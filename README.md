@@ -1,7 +1,6 @@
 # Niagara2Effekseer
 
-Tools for making and studying [Effekseer](https://effekseer.github.io/) effects (`.efkefc`) for RPG Maker MZ and
-RPGReactor, with the start of a converter from Unreal Engine particle effects.
+Tools for making and studying [Effekseer](https://effekseer.github.io/) effects (`.efkefc`) for all engines that support it, with the start of a converter from Unreal Engine particle effects.
 
 It is research tooling, not a one-click converter. The detailed notes in [docs/REFERENCE.md](docs/REFERENCE.md)
 record how each tool works, what was measured and why.
