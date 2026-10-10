@@ -1404,6 +1404,9 @@ namespace Niagara2Efk
 					b.SetValue(j.GetBoolean()); return true;
 				case Effekseer.Data.Value.IntWithInifinite ii when whole:
 					ii.Infinite.SetValue(false); ii.Value.SetValue(iv); return true;
+				// "inf", as dump prints it: an endless count (MaxGeneration of a looping emitter)
+				case Effekseer.Data.Value.IntWithInifinite ii when j.ValueKind == JsonValueKind.String && j.GetString() == "inf":
+					ii.Infinite.SetValue(true); return true;
 				case Effekseer.Data.Value.FloatWithRandom fr when num:
 					SetRange(fr, j.GetSingle(), j.GetSingle()); return true;
 				case Effekseer.Data.Value.FloatWithRandom fr when arr != null && arr.Length == 2:
@@ -1829,6 +1832,15 @@ namespace Niagara2Efk
 			}
 			if (leaf.Value is Effekseer.Data.Value.String sv && wanted.ValueKind == JsonValueKind.String)
 				return sv.Value == wanted.GetString();
+			if (leaf.Value is Effekseer.Data.Value.IntWithInifinite iw)
+			{
+				bool askInf = wanted.ValueKind == JsonValueKind.String && wanted.GetString() == "inf";
+				if (askInf || iw.Infinite.Value)
+				{
+					if (askInf != iw.Infinite.Value) why = askInf ? "saved as a finite count" : "saved as infinite";
+					return askInf == iw.Infinite.Value;
+				}
+			}
 			if (leaf.Value is ProceduralModelReference pr)
 			{
 				if (wanted.ValueKind == JsonValueKind.String) return pr.Value != null && pr.Value.Name.Value == wanted.GetString();

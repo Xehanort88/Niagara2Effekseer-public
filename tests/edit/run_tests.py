@@ -412,6 +412,13 @@ class Suite:
             contains(dump, base + "/A = fcurve[0:0 30:200 100:0]")
             self.line(dump, base + "/A/Sampling", "1")
 
+    def infinite_count(self, value, code=0):
+        """MaxGeneration "inf" (an endless emitter, as dump prints it) written and read back; a finite count after
+        it turns the flag off again; other text refused."""
+        result = self.edit(self.spec({"node": "0", "set": {"CommonValues/MaxGeneration": value}}), code=code)
+        if not code:
+            self.line(self.dump(result), "CommonValues/MaxGeneration", "inf" if value == "inf" else str(value))
+
     def dump_metadata(self):
         out = self.edit(self.spec({"node": "0", "set": {
             CURVE + "/OffsetMin": 2, CURVE + "/OffsetMax": 5}}, self.percent))
@@ -611,6 +618,9 @@ class Suite:
         yield "keys_time_same_op", lambda: self.keys(timeline="Time", points=[[-1, 1], [120, 2]])
         yield "keys_colour_int_curve", lambda: self.colour_keys([[0, 0], [30, 200], [100, 0]])
         yield "keys_colour_fraction_refused", lambda: self.colour_keys([[0, 0.5], [100, 0]], code=1)
+        yield "max_generation_infinite", lambda: self.infinite_count("inf")
+        yield "max_generation_finite", lambda: self.infinite_count(12)
+        yield "max_generation_text_refused", lambda: self.infinite_count("forever", code=1)
         yield "shift_percent_life_refused", lambda: self.shift(code=1)
         yield "shift_percent_above_100_refused", lambda: self.shift(life=100, by=20, code=1)
         yield "shift_percent_below_0_refused", lambda: self.shift(life=100, by=-5, code=1)
