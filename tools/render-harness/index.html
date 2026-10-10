@@ -1,0 +1,201 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Effekseer render harness</title>
+<style>
+  body { background:#111; color:#ddd; font:13px/1.5 system-ui, sans-serif; margin:12px; }
+  canvas { background:#000; border:1px solid #444; display:block; margin-bottom:8px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; }
+  pre { background:#1a1a1a; padding:8px; border:1px solid #333; }
+  h2 { font-size:13px; margin:0 0 4px; font-weight:600; }
+</style>
+
+<div class="row">
+  <div><h2 id="t0">-</h2><canvas id="c0" width="480" height="480"></canvas></div>
+  <div><h2 id="t1">-</h2><canvas id="c1" width="480" height="480"></canvas></div>
+  <div><h2 id="t2">-</h2><canvas id="c2" width="480" height="480"></canvas></div>
+  <div><h2 id="t3">-</h2><canvas id="c3" width="480" height="480"></canvas></div>
+</div>
+<pre id="log">starting…</pre>
+
+<script src="effekseer.min.js"></script>
+<script>
+// Render two effects side by side under the project's own 1.70e WebGL runtime.
+// Slot 0 is a stock MZ effect (control). Slot 1 is our generated one.
+// If the control draws and ours does not, the fault is in the effect, not here.
+// The stock files are RPG Maker MZ assets and are not distributed here: copy
+// effects/HitPhysical.efkefc and effects/Texture/Particle100.png from an MZ
+// project into this folder (SpriteBurst.efkefc uses Texture/Particle100.png).
+// The assembled/ and columnexplode/ cases are built locally from your own packs.
+
+const SLOTS = [
+  { canvas: 'c0', title: 't0', file: 'HitPhysical.efkefc', label: 'CONTROL — stock HitPhysical.efkefc' },
+  { canvas: 'c1', title: 't1', file: 'SpriteBurst.efkefc', label: 'GENERATED — SpriteBurst.efkefc' },
+  { canvas: 'c2', title: 't2', file: 'assembled/HardCases.efkefc', label: 'ASSEMBLED — HardCases.efkefc (4 grafted parts)' },
+  // A sequenced effect needs a longer run than the 70-frame default, and one
+  // "brightest frame" cannot show a before and an after, so ask for a filmstrip.
+  { canvas: 'c3', title: 't3', file: 'columnexplode/ColumnExplode.efkefc',
+    label: 'ASSEMBLED — ColumnExplode.efkefc', frames: 160,
+    strip: [10, 25, 35, 45, 52, 60, 72, 90, 115] },
+];
+
+const logEl = document.getElementById('log');
+const lines = [];
+function log(s) { lines.push(s); logEl.textContent = lines.join('\n'); }
+
+window.__result = { done: false, slots: {} };
+
+function identity() {
+  return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+}
+function perspective(fovyDeg, aspect, near, far) {
+  const f = 1 / Math.tan(fovyDeg * Math.PI / 360);
+  const nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ]);
+}
+function lookAtZ(dist) {
+  // Camera on +Z looking at the origin, Y up. Column-major view matrix.
+  return new Float32Array([
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,-dist,1,
+  ]);
+}
+
+// Count pixels that are meaningfully brighter than the black clear colour.
+function litPixels(gl, w, h) {
+  const buf = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  let n = 0, peak = 0;
+  for (let i = 0; i < buf.length; i += 4) {
+    const v = Math.max(buf[i], buf[i+1], buf[i+2]);
+    if (v > 16) n++;
+    if (v > peak) peak = v;
+  }
+  return { lit: n, peak };
+}
+
+function runSlot(slot) {
+  return new Promise((resolve) => {
+    const canvas = document.getElementById(slot.canvas);
+    document.getElementById(slot.title).textContent = slot.label;
+
+    const gl = canvas.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+    if (!gl) { log(slot.file + ': no webgl context'); return resolve({ error: 'no webgl' }); }
+
+    const ctx = effekseer.createContext();
+    ctx.init(gl);
+
+    let loadError = null;
+    const effect = ctx.loadEffect(
+      slot.file, 1.0,
+      () => log(slot.file + ': loaded'),
+      (m, url) => { loadError = String(m) + ' @ ' + url; log(slot.file + ': LOAD ERROR ' + loadError); }
+    );
+
+    const proj = perspective(45, canvas.width / canvas.height, 1, 1000);
+    const view = lookAtZ(40);
+
+    let frame = 0, best = { lit: 0, peak: 0 }, handle = null;
+    let bestFrameUrl = null, bestFrameNo = -1;
+    const stripShots = [];
+    const totalFrames = slot.frames || 70;
+
+    function tick() {
+      try { tickBody(); }
+      catch (e) {
+        log(slot.file + ': TICK THREW at frame ' + frame + ': ' + e);
+        resolve({ file: slot.file, error: String(e), litPixels: 0, rendered: false });
+      }
+    }
+
+    function tickBody() {
+      if (frame === 5) {
+        try { handle = ctx.play(effect, 0, 0, 0); }
+        catch (e) { log(slot.file + ': play threw ' + e); }
+      }
+
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+
+      ctx.update(1.0);
+      ctx.setProjectionMatrix(proj);
+      ctx.setCameraMatrix(view);
+      ctx.draw();
+
+      if (frame > 6) {
+        const s = litPixels(gl, canvas.width, canvas.height);
+        if (s.lit > best.lit) {
+          best = s;
+          // preserveDrawingBuffer is on, so the brightest frame can be grabbed
+          // and pinned afterwards — otherwise the run ends on an empty canvas.
+          bestFrameUrl = canvas.toDataURL('image/png');
+          bestFrameNo = frame;
+        }
+      }
+
+      if (slot.strip && slot.strip.indexOf(frame) >= 0) {
+        stripShots.push({ f: frame, lit: litPixels(gl, canvas.width, canvas.height).lit,
+                          url: canvas.toDataURL('image/png') });
+      }
+
+      frame++;
+      if (frame < totalFrames) setTimeout(tick, 8);
+      else {
+        const r = { file: slot.file, loadError, litPixels: best.lit, peakBrightness: best.peak,
+                    brightestFrame: bestFrameNo, rendered: best.lit > 200 };
+        if (stripShots.length) r.strip = stripShots.map(s => ({ frame: s.f, lit: s.lit }));
+
+        const holder = canvas.parentNode;
+        if (bestFrameUrl) {
+          const img = new Image();
+          img.src = bestFrameUrl;
+          img.width = canvas.width; img.height = canvas.height;
+          canvas.replaceWith(img);
+          document.getElementById(slot.title).textContent =
+            slot.label + '  — frame ' + bestFrameNo + ', ' + best.lit + ' lit px';
+        }
+
+        // A filmstrip, so a sequenced effect can be read as a sequence.
+        if (stripShots.length && holder) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;margin-top:6px';
+          for (const s of stripShots) {
+            const cell = document.createElement('div');
+            const im = new Image();
+            im.src = s.url; im.width = 150; im.height = 150;
+            im.style.cssText = 'display:block;border:1px solid #333';
+            const cap = document.createElement('div');
+            cap.textContent = 'f' + s.f + ' · ' + s.lit + 'px';
+            cap.style.cssText = 'font-size:10px;color:#888';
+            cell.appendChild(im); cell.appendChild(cap); row.appendChild(cell);
+          }
+          holder.appendChild(row);
+        }
+
+        log(slot.file + ': ' + JSON.stringify(r));
+        resolve(r);
+      }
+    }
+    setTimeout(tick, 8);
+  });
+}
+
+effekseer.initRuntime('effekseer.wasm', async () => {
+  log('runtime ready');
+  for (const slot of SLOTS) {
+    window.__result.slots[slot.file] = await runSlot(slot);
+  }
+  window.__result.done = true;
+  log('ALL DONE');
+}, () => {
+  log('FAILED to init effekseer runtime');
+  window.__result = { done: true, error: 'runtime init failed' };
+});
+</script>

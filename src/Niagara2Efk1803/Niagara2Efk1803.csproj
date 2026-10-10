@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The same tool (every source file of src/Niagara2Efk), built against Effekseer
+    1.80.3 instead of 1.70e. Output is .efkefc binary version 1810, which only a
+    1.8 runtime plays (the test project since 2026-09-27; the draft project still
+    runs 1.70, so keep using the 170e build for it). EFK18 gates the few places
+    where the two cores differ.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>Niagara2Efk</AssemblyName>
+    <RootNamespace>Niagara2Efk</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>$(DefineConstants);EFK18</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Niagara2Efk\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EffekseerCore1803\EffekseerCore1803.csproj" />
+  </ItemGroup>
+
+</Project>

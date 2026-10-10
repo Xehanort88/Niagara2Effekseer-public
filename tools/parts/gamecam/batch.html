@@ -1,0 +1,320 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>part contact-sheet renderer</title>
+<style>
+  body { background:#111; color:#ddd; font:12px/1.4 system-ui, sans-serif; margin:8px; }
+  canvas { background:#000; border:1px solid #333; }
+  #log { white-space:pre; font:11px/1.3 ui-monospace, monospace; color:#8a8; }
+</style>
+
+<canvas id="stage" width="640" height="360"></canvas>
+<canvas id="thumb" width="160" height="160" style="display:none"></canvas>
+<div id="log">booting</div>
+
+<script src="/harness/effekseer.min.js"></script>
+<script>
+// Render one standalone effect per distinct part and post a thumbnail back to
+// the driver, so thousands of parts become something a person can look at --
+// and measure how big each one looks, so parts can be scaled against each other.
+//
+// One WebGL context and one Effekseer context are reused for the whole run:
+// browsers cap live WebGL contexts well below the number of parts here.
+//
+// Simulation is advanced every frame but drawn only on sampled frames. Drawing
+// is the expensive half under SwiftShader, and a part's brightest moment is not
+// sharp enough in time for every-frame sampling to be worth 3x the wall clock.
+
+const SAMPLE_EVERY = 3;
+const LIT_THRESHOLD = 16;     // differing from the ground by more than this counts as drawn
+const RENDERED_MIN = 60;      // fewer lit pixels than this reads as "nothing"
+const EXTENT_MIN = 20;        // a sampled frame joins the run extent only above this, so specks do not
+
+const CAMERA_DISTANCE = 40;
+const FOV_DEGREES = 45;
+
+const stage = document.getElementById('stage');
+const thumb = document.getElementById('thumb');
+{
+  const t = parseInt(new URLSearchParams(location.search).get('thumb') || '160', 10);
+  thumb.width = 640; thumb.height = 360;
+}
+const tctx = thumb.getContext('2d');
+const logEl = document.getElementById('log');
+function log(s) { logEl.textContent = s; }
+
+const gl = stage.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+const W = stage.width, H = stage.height;
+const pixbuf = new Uint8Array(W * H * 4);
+
+// The camera looks straight at the effect origin, so the origin lands on the
+// centre of the frame and a part's spread can be measured outward from there.
+// That is the right centre for scaling: a spec's scale is applied by a wrapper
+// node about the part's origin, not about wherever its pixels happen to fall.
+const CX = W / 2, CY = H / 2;
+const MAX_R = Math.ceil(Math.sqrt(CX * CX + CY * CY)) + 1;
+const radial = new Uint32Array(MAX_R);
+
+// Effect units per pixel on the plane through the origin facing the camera.
+// It is exact only for pixels drawn at that depth, so a size built from it is
+// an apparent size -- which is what matters when two parts are seen together
+// from the same camera.
+const UNITS_PER_PIXEL = 2 * CAMERA_DISTANCE * Math.tan(FOV_DEGREES * Math.PI / 360) / H;
+
+function perspective(fovyDeg, aspect, near, far) {
+  const f = 1 / Math.tan(fovyDeg * Math.PI / 360);
+  const nf = 1 / (near - far);
+  return new Float32Array([f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]);
+}
+function lookAtZ(d) {
+  return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-d,1]);
+}
+
+function radiusHolding(n, fraction) {
+  const want = n * fraction;
+  let acc = 0;
+  for (let r = 0; r < MAX_R; r++) {
+    acc += radial[r];
+    if (acc >= want) return r;
+  }
+  return MAX_R - 1;
+}
+
+// "Lit" means "different from the background", not "bright". On grey a
+// subtractive part shows up as a darker region, and counting brightness alone
+// would score it zero exactly as black did.
+//
+// Radii are taken as the distance from the origin that holds half and nine
+// tenths of the drawn pixels. A bounding box alone is at the mercy of one stray
+// spark at the edge; a percentile radius is not.
+function measure(bg) {
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, pixbuf);
+  const r0 = Math.round(bg[0] * 255), g0 = Math.round(bg[1] * 255), b0 = Math.round(bg[2] * 255);
+  radial.fill(0);
+
+  let n = 0, peak = 0, sx = 0, sy = 0;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+
+  for (let i = 0, p = 0; i < pixbuf.length; i += 4, p++) {
+    const d = Math.max(Math.abs(pixbuf[i] - r0),
+                       Math.abs(pixbuf[i+1] - g0),
+                       Math.abs(pixbuf[i+2] - b0));
+    if (d > peak) peak = d;
+    if (d <= LIT_THRESHOLD) continue;
+
+    const x = p % W;
+    // readPixels starts at the bottom row. Flip so every coordinate recorded
+    // here matches the thumbnail, which is drawn top row first.
+    const y = H - 1 - ((p / W) | 0);
+
+    n++; sx += x; sy += y;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+
+    const dx = x + 0.5 - CX, dy = y + 0.5 - CY;
+    radial[Math.min(MAX_R - 1, Math.round(Math.sqrt(dx * dx + dy * dy)))]++;
+  }
+
+  return {
+    lit: n, peak,
+    cx: n ? sx / n : 0, cy: n ? sy / n : 0,
+    bbox: n ? [x0, y0, x1, y1] : null,
+    r50: n ? radiusHolding(n, 0.5) : null,
+    r90: n ? radiusHolding(n, 0.9) : null,
+  };
+}
+
+function touchesEdge(b) {
+  return !!b && (b[0] <= 0 || b[1] <= 0 || b[2] >= W - 1 || b[3] >= H - 1);
+}
+
+function snapshot() {
+  tctx.clearRect(0, 0, thumb.width, thumb.height);
+  tctx.drawImage(stage, 0, 0, thumb.width, thumb.height);
+  return thumb.toDataURL('image/png');
+}
+
+// Backing the camera off was tried first and recovered nothing: every part that
+// draws, draws at 40, and the rest stayed dark at 140, 450 and 1400. What does
+// separate them is blend mode. A quarter of the parts that show nothing on black
+// are subtractive, which on a black ground can only darken what is already at
+// the floor, and alpha-blended parts with dark textures fare little better. So
+// each part is tried on black first -- right for the additive majority -- and
+// anything still blank is retried on grey.
+const BACKGROUNDS = [[0.26, 0.26, 0.30]];
+// Name the backdrop from its colour: this page has only the grey one, at index 0, which the
+// copied two-backdrop code used to call 'black'.
+function backgroundName(i) { return BACKGROUNDS[i].some((c) => c > 0) ? 'grey' : 'black'; }
+
+const proj = new Float32Array([H/W,0,0,0, 0,1,0,0, 0,0,1,-1.2, 0,0,0,1]);
+const view = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-10,1]);
+let ctx = null;
+
+function renderPart(part, bgIndex) {
+  return new Promise((resolve) => {
+    const bg = BACKGROUNDS[bgIndex];
+    const total = part.frames || 120;
+    let effect = null, loadError = null, handle = null;
+
+    // loadEffect fetches the effect and every texture it names. Playing before
+    // that finishes is the difference between a thumbnail and a black square,
+    // and it fails silently -- the first run of this page reported all twelve
+    // sample parts blank because it played on the next tick.
+    let settled = false;
+    const loaded = new Promise((done) => {
+      const once = () => { if (!settled) { settled = true; done(); } };
+      const guard = setTimeout(() => { loadError = loadError || 'load timed out'; once(); }, 20000);
+      const finishLoad = () => { clearTimeout(guard); once(); };
+      try {
+        effect = ctx.loadEffect('/parts/' + part.efkefc, 1.0,
+          finishLoad,
+          (m, url) => { loadError = String(m) + ' @ ' + url; finishLoad(); });
+      } catch (e) {
+        loadError = 'loadEffect threw: ' + e;
+        finishLoad();
+      }
+    });
+
+    loaded.then(() => {
+      if (!effect || loadError) {
+        try { if (effect) ctx.releaseEffect(effect); } catch (e) {}
+        return resolve({ id: part.id, error: null, loadError: loadError || 'no effect',
+                         background: backgroundName(bgIndex),
+                         lit: 0, peak: 0, bestFrame: -1, rendered: false, trace: [] });
+      }
+      let frame = 0;
+      let best = { lit: 0, peak: 0, cx: 0, cy: 0, bbox: null, r50: null, r90: null };
+      let bestFrame = -1, bestPng = null;
+      // Union of every substantial frame's box: how much room the part needs
+      // over its whole life, as opposed to how big it looks at its peak.
+      let extent = null;
+      const trace = [];
+      const inst = [];
+
+      // Optional filmstrip: a part (or a whole assembled effect) can ask for
+      // snapshots at chosen frames, because one brightest frame cannot show
+      // whether a sequence reads -- a column that should burst at its end looks
+      // identical to one that bursts at its start. Strip frames are drawn even
+      // off the sampling grid, but only grid frames feed the trace, so the
+      // trace index still means frame index / SAMPLE_EVERY.
+      const stripFrames = new Set(part.strip || []);
+      const stripShots = [];
+
+      // An optional per-entry `seed` fixes this play's random numbers. Without it the context's
+      // random state runs on from the previous play, so the same file played twice can differ.
+      try {
+        handle = ctx.play(effect, 0, 0, 0);
+        if (part.seed !== undefined) handle.setRandomSeed(part.seed);
+      }
+      catch (e) { return finish('play threw: ' + e); }
+
+      function finish(err) {
+        try { ctx.stopAll(); } catch (e) {}
+        try { ctx.releaseEffect(effect); } catch (e) {}
+        const drew = best.lit >= RENDERED_MIN;
+        const r = {
+          id: part.id, error: err || null, loadError, background: backgroundName(bgIndex),
+          lit: best.lit, peak: best.peak, bestFrame,
+          centroid: [Math.round(best.cx), Math.round(best.cy)],
+          rendered: drew,
+          trace, inst, png: bestPng,
+        };
+        if (stripShots.length) r.strip = stripShots;
+        // Sizes are only worth anything for a part that visibly drew. A handful
+        // of faint pixels from a blank part would produce a confident-looking
+        // radius that means nothing.
+        if (drew) {
+          r.bbox = best.bbox;
+          r.r50 = best.r50;
+          r.r90 = best.r90;
+          r.extent = extent;
+          r.clipped = touchesEdge(best.bbox);
+          r.extentClipped = touchesEdge(extent);
+          r.unitsPerPixel = UNITS_PER_PIXEL;
+        }
+        resolve(r);
+      }
+
+      function step() {
+        try {
+          const deadline = performance.now() + 60;
+          while (frame < total) {
+            ctx.update(1.0);
+            inst.push(32000 - ctx.getRestInstancesCount());
+            const onGrid = frame % SAMPLE_EVERY === 0;
+            const onStrip = stripFrames.has(frame);
+            if (onGrid || onStrip) {
+              gl.clearColor(bg[0], bg[1], bg[2], 1);
+              gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+              gl.viewport(0, 0, W, H);
+              ctx.setProjectionMatrix(proj);
+              ctx.setCameraMatrix(view);
+              ctx.draw();
+              const m = measure(bg);
+              if (onGrid) {
+                trace.push(m.lit);
+                if (m.lit >= EXTENT_MIN && m.bbox) {
+                  extent = extent
+                    ? [Math.min(extent[0], m.bbox[0]), Math.min(extent[1], m.bbox[1]),
+                       Math.max(extent[2], m.bbox[2]), Math.max(extent[3], m.bbox[3])]
+                    : m.bbox.slice();
+                }
+                if (m.lit > best.lit) { best = m; bestFrame = frame; bestPng = snapshot(); }
+              }
+              if (onStrip) stripShots.push({ frame, lit: m.lit, png: snapshot() });
+            }
+            frame++;
+            if (performance.now() > deadline) break;
+          }
+        } catch (e) {
+          return finish('tick threw at frame ' + frame + ': ' + e);
+        }
+        if (frame < total) setTimeout(step, 0);
+        else finish(null);
+      }
+      step();
+    });
+  });
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+async function main() {
+  if (!gl) { await post('/done', { error: 'no webgl context' }); return; }
+  ctx = effekseer.createContext();
+  ctx.init(gl, { instanceMaxCount: 32000 });
+
+  const manifest = await (await fetch('/manifest')).json();
+  const parts = manifest.parts;
+  let done = 0, drew = 0, failed = 0;
+
+  for (const part of parts) {
+    let r = null;
+    for (let v = 0; v < BACKGROUNDS.length; v++) {
+      try { r = await renderPart(part, v); }
+      catch (e) { r = { id: part.id, error: 'renderPart threw: ' + e }; }
+      // A load failure will not improve on a different ground.
+      if (r.rendered || r.error || r.loadError) break;
+    }
+    if (r.error || r.loadError) failed++;
+    else if (r.rendered) drew++;
+    done++;
+    await post('/result', r);
+    if (done % 20 === 0 || done === parts.length) {
+      log(done + '/' + parts.length + '  drew ' + drew + '  failed ' + failed);
+    }
+  }
+  await post('/done', { total: parts.length, drew, failed });
+}
+
+effekseer.initRuntime('/harness/effekseer.wasm', main, async () => {
+  await post('/done', { error: 'effekseer runtime init failed' });
+});
+</script>

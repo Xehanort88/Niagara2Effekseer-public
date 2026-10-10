@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+__pycache__/
+*.pyc
+
+# Generated: effects, part renders, catalogue (catalogue.json alone is >100 MB).
+# Everything here is regenerable from the tools, and much of it derives from
+# third-party commercial effect packs.
+out/
+
+# Harness cases built from third-party pack assets (textures, models).
+# Regenerate them from out/ when needed; do not commit.
+tools/render-harness/assembled/
+tools/render-harness/columnexplode/
+
+# Local Claude Code permissions
+.claude/settings.local.json
+
+# Local tool configuration
+.claude/
+.codex-remote-attachments/

@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Wrapper around the pristine Effekseer 170e checkout in external/.
+
+    Upstream ships two project files for EffekseerCore at this tag and neither is
+    usable as-is here:
+      * EffekseerCore.csproj      - legacy non-SDK csproj, .NET Framework 4.5,
+                                    packages.config, System.Drawing/System.Web.
+      * EffekseerCore.Std.csproj  - SDK-style but targets netcoreapp3.1, which is
+                                    long out of support.
+
+    Rather than edit the clone (which must stay byte-identical to tag 170e so the
+    pin means something), this project globs the same sources at net9.0 using the
+    same DefineConstants as the .Std variant. DOTNET_STARNDARD is what gates the
+    .NET Framework-only code paths off.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>EffekseerCore</AssemblyName>
+    <RootNamespace>Effekseer</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>SCRIPT_ENABLED;DOTNET_STARNDARD;</DefineConstants>
+    <!-- Upstream code, not ours: don't fail the build on its style warnings. -->
+    <NoWarn>$(NoWarn);CS8981;CS0659;CS0067;CS0649;SYSLIB0021;CA2200</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <EfkCoreDir>..\..\external\Effekseer\Dev\Editor\EffekseerCore</EfkCoreDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(EfkCoreDir)\**\*.cs" Exclude="$(EfkCoreDir)\Properties\AssemblyInfo.cs;$(EfkCoreDir)\bin\**\*.cs;$(EfkCoreDir)\obj\**\*.cs" />
+    <!-- Ours, not upstream's: grants the generator access to internal IO types. -->
+    <Compile Include="AssemblyAttributes.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="IronPython" Version="2.7.9" />
+    <PackageReference Include="Microsoft.CSharp" Version="4.7.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="TinyCsvParser" Version="2.5.2" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,289 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Effekseer render harness — parameterised</title>
+<style>
+  body { background:#111; color:#ddd; font:13px/1.5 system-ui, sans-serif; margin:12px; }
+  canvas, img { background:#000; border:1px solid #444; display:block; margin-bottom:8px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  pre { background:#1a1a1a; padding:8px; border:1px solid #333; white-space:pre-wrap; }
+  h2 { font-size:12px; margin:0 0 4px; font-weight:600; }
+</style>
+
+<div class="row" id="slots"></div>
+<pre id="log">starting…</pre>
+
+<script src="effekseer.min.js"></script>
+<script>
+// Same measurement as index.html, but the effects under test come from the query
+// string so assembled output can be played without editing the page:
+//
+//   verify.html?f=/out/assembled/A.efkefc,/out/assembled/B.efkefc&frames=200&dist=90
+//
+// The stock control effect is always slot 0. If the control draws and an effect
+// under test does not, the fault is in the effect, not the harness.
+// Resource paths inside an .efkefc are relative to the effect file, so the
+// server must be rooted high enough for each effect's Texture/Model/Materials
+// folders to resolve.
+
+const q = new URLSearchParams(location.search);
+const FRAMES = parseInt(q.get('frames') || '200', 10);
+const DIST = parseFloat(q.get('dist') || '40');
+const SIZE = parseInt(q.get('size') || '320', 10);
+// backdrop=checker draws a patterned background and measures the effect as
+// displacement from it, which is the only way to see a distortion material.
+const BACKDROP = q.get('backdrop') === 'checker';
+
+const FILES = (q.get('f') || 'SpriteBurst.efkefc').split(',').filter(Boolean);
+const SLOTS = [{ file: q.get('control') || 'HitPhysical.efkefc', label: 'CONTROL' }]
+  .concat(FILES.map(f => ({ file: f, label: 'TEST' })));
+
+const slotsEl = document.getElementById('slots');
+SLOTS.forEach((s, i) => {
+  s.canvas = 'c' + i; s.title = 't' + i;
+  const d = document.createElement('div');
+  d.innerHTML = '<h2 id="t' + i + '">-</h2><canvas id="c' + i + '" width="' + SIZE + '" height="' + SIZE + '"></canvas>';
+  slotsEl.appendChild(d);
+});
+
+const logEl = document.getElementById('log');
+const lines = [];
+function log(s) { lines.push(s); logEl.textContent = lines.join('\n'); }
+
+window.__result = { done: false, slots: {} };
+
+function perspective(fovyDeg, aspect, near, far) {
+  const f = 1 / Math.tan(fovyDeg * Math.PI / 360);
+  const nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0,
+    0, f, 0, 0,
+    0, 0, (far + near) * nf, -1,
+    0, 0, 2 * far * near * nf, 0,
+  ]);
+}
+function lookAtZ(dist) {
+  return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-dist,1]);
+}
+
+function readPixels(gl, w, h) {
+  const buf = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  return buf;
+}
+
+function litPixels(gl, w, h) {
+  const buf = readPixels(gl, w, h);
+  let n = 0, peak = 0;
+  for (let i = 0; i < buf.length; i += 4) {
+    const v = Math.max(buf[i], buf[i+1], buf[i+2]);
+    if (v > 16) n++;
+    if (v > peak) peak = v;
+  }
+  return { lit: n, peak };
+}
+
+// Count pixels that differ from a captured baseline. Needed for distortion:
+// a BackDistortion particle emits no light of its own, it bends whatever is
+// behind it, so against the black clear colour it is perfectly invisible and
+// litPixels reports a correct conversion as a total failure. Measured against a
+// patterned backdrop, the same particle shows up as displaced pixels.
+function changedPixels(gl, w, h, base) {
+  const buf = readPixels(gl, w, h);
+  let n = 0, peak = 0;
+  for (let i = 0; i < buf.length; i += 4) {
+    const d = Math.max(
+      Math.abs(buf[i] - base[i]),
+      Math.abs(buf[i+1] - base[i+1]),
+      Math.abs(buf[i+2] - base[i+2]));
+    if (d > 8) n++;
+    if (d > peak) peak = d;
+  }
+  return { lit: n, peak };
+}
+
+// A procedural checkerboard drawn as a fullscreen quad. A flat colour would not
+// do: distortion displaces the background, and displacing a uniform field
+// leaves it unchanged. The pattern has to have detail for the displacement to
+// become visible.
+function makeBackdrop(gl) {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, 'attribute vec2 p; varying vec2 uv;' +
+    'void main(){ uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }');
+  gl.compileShader(vs);
+
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, 'precision mediump float; varying vec2 uv;' +
+    'void main(){' +
+    '  vec2 c = floor(uv * 16.0);' +
+    '  float m = mod(c.x + c.y, 2.0);' +
+    '  vec3 col = mix(vec3(0.22, 0.24, 0.30), vec3(0.42, 0.45, 0.52), m);' +
+    '  gl_FragColor = vec4(col, 1.0);' +
+    '}');
+  gl.compileShader(fs);
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+  const loc = gl.getAttribLocation(prog, 'p');
+
+  return function draw() {
+    // Effekseer leaves its own GL state behind, so everything this quad needs
+    // is set explicitly rather than assumed.
+    gl.useProgram(prog);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.useProgram(null);
+  };
+}
+
+function shortName(f) { return f.split('/').pop(); }
+
+function runSlot(slot) {
+  return new Promise((resolve) => {
+    const canvas = document.getElementById(slot.canvas);
+    document.getElementById(slot.title).textContent = slot.label + ' — ' + shortName(slot.file);
+
+    const gl = canvas.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+    if (!gl) { log(slot.file + ': no webgl context'); return resolve({ error: 'no webgl' }); }
+
+    const ctx = effekseer.createContext();
+    ctx.init(gl);
+
+    // Every failed resource fetch is recorded, not just the last one: a part
+    // whose textures were not copied next to the output shows up here.
+    const loadErrors = [];
+    const effect = ctx.loadEffect(
+      slot.file, 1.0,
+      () => log(shortName(slot.file) + ': loaded'),
+      (m, url) => { loadErrors.push(String(m) + ' @ ' + url); log(shortName(slot.file) + ': LOAD ERROR ' + m + ' @ ' + url); }
+    );
+
+    const proj = perspective(45, canvas.width / canvas.height, 1, 1000);
+    const view = lookAtZ(DIST);
+
+    let frame = 0, best = { lit: 0, peak: 0 };
+    let bestFrameUrl = null, bestFrameNo = -1;
+    // Coarse timeline, so a part that only appears after a delay is visible in
+    // the numbers rather than hidden behind a single peak.
+    const timeline = [];
+
+    // With a backdrop the effect is measured as displacement from a baseline
+    // captured before it starts, not as light against black.
+    const drawBackdrop = BACKDROP ? makeBackdrop(gl) : null;
+    let baseline = null;
+    const PLAY_FRAME = BACKDROP ? 10 : 5;
+
+    function tick() {
+      try { tickBody(); }
+      catch (e) {
+        log(shortName(slot.file) + ': TICK THREW at frame ' + frame + ': ' + e);
+        resolve({ file: slot.file, error: String(e), litPixels: 0, rendered: false, loadErrors });
+      }
+    }
+
+    function tickBody() {
+      if (frame === PLAY_FRAME) {
+        try { ctx.play(effect, 0, 0, 0); }
+        catch (e) { log(shortName(slot.file) + ': play threw ' + e); }
+      }
+
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+
+      if (drawBackdrop) drawBackdrop();
+
+      ctx.update(1.0);
+      ctx.setProjectionMatrix(proj);
+      ctx.setCameraMatrix(view);
+
+      // A BackDistortion particle samples a captured copy of the framebuffer.
+      // Without this call the runtime has no background to sample and draws
+      // nothing at all, which looks exactly like a broken effect.
+      if (drawBackdrop) ctx.captureBackground(0, 0, canvas.width, canvas.height);
+
+      ctx.draw();
+
+      // Capture the empty backdrop on the frame before the effect starts.
+      if (drawBackdrop && frame === PLAY_FRAME - 1) {
+        baseline = readPixels(gl, canvas.width, canvas.height);
+      }
+
+      if (frame > PLAY_FRAME + 1) {
+        const s = baseline
+          ? changedPixels(gl, canvas.width, canvas.height, baseline)
+          : litPixels(gl, canvas.width, canvas.height);
+        if (frame % 20 === 0) timeline.push([frame, s.lit]);
+        if (s.lit > best.lit) {
+          best = s;
+          bestFrameUrl = canvas.toDataURL('image/png');
+          bestFrameNo = frame;
+        }
+      }
+
+      frame++;
+      if (frame < FRAMES) setTimeout(tick, 4);
+      else {
+        const r = { file: slot.file, loadErrors, litPixels: best.lit, peakBrightness: best.peak,
+                    metric: baseline ? 'changed-vs-backdrop' : 'lit-on-black',
+                    brightestFrame: bestFrameNo, timeline, rendered: best.lit > 200 };
+        if (bestFrameUrl) {
+          const img = new Image();
+          img.src = bestFrameUrl;
+          img.width = canvas.width; img.height = canvas.height;
+          canvas.replaceWith(img);
+          document.getElementById(slot.title).textContent =
+            slot.label + ' — ' + shortName(slot.file) + '  — f' + bestFrameNo + ', ' + best.lit + ' px';
+        }
+        log(shortName(slot.file) + ': ' + JSON.stringify(r));
+        resolve(r);
+      }
+    }
+    setTimeout(tick, 4);
+  });
+}
+
+// A missing .efkefc does NOT reach loadEffect's error callback: the runtime
+// reports no error and the slot simply measures zero lit pixels, which reads
+// as "the effect draws nothing" when the truth is "the file is not there".
+// That cost a whole misleading test run, so check the file exists first.
+async function precheck(slot) {
+  try {
+    const r = await fetch(slot.file, { method: 'HEAD' });
+    if (!r.ok) return 'HTTP ' + r.status;
+  } catch (e) {
+    return String(e);
+  }
+  return null;
+}
+
+effekseer.initRuntime('effekseer.wasm', async () => {
+  log('runtime ready');
+  for (const slot of SLOTS) {
+    const missing = await precheck(slot);
+    if (missing) {
+      log(shortName(slot.file) + ': FILE NOT FOUND (' + missing + ') — not a render failure');
+      document.getElementById(slot.title).textContent =
+        slot.label + ' — ' + shortName(slot.file) + '  — FILE NOT FOUND';
+      window.__result.slots[slot.file] = { file: slot.file, missing, rendered: false, litPixels: null };
+      continue;
+    }
+    window.__result.slots[slot.file] = await runSlot(slot);
+  }
+  window.__result.done = true;
+  log('ALL DONE');
+}, () => {
+  log('FAILED to init effekseer runtime');
+  window.__result = { done: true, error: 'runtime init failed' };
+});
+</script>

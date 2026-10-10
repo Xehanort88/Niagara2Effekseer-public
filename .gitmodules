@@ -1,0 +1,8 @@
+[submodule "external/Effekseer"]
+	path = external/Effekseer
+	url = https://github.com/effekseer/Effekseer.git
+	shallow = true
+[submodule "external/Effekseer1803"]
+	path = external/Effekseer1803
+	url = https://github.com/effekseer/Effekseer.git
+	shallow = true
