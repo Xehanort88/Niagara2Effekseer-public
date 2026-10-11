@@ -148,7 +148,12 @@ class GLB:
                 for attr, width in [(normal, 3), (tangent, 4)]:
                     require(attr is None or (len(attr) == len(pos) and all(len(x) == width for x in attr)), 'Invalid NORMAL/TANGENT shapes')
                 material = self.j.get('materials', [])[p['material']].get('name', 'material'+str(p['material'])) if 'material' in p else 'default'
-                result.append({'material': material, 'pos': pos, 'normal': normal, 'tangent': tangent, 'uv': uv, 'faces': faces})
+                color = None
+                if 'COLOR_0' in a:
+                    color = [list(c[:4]) + [1.0]*(4-len(c)) for c in self.accessor(a['COLOR_0'])]
+                    require(len(color) == len(pos), 'Invalid COLOR_0 shape')
+                result.append({'material': material, 'pos': pos, 'normal': normal, 'tangent': tangent, 'uv': uv, 'faces': faces,
+                               'color': color})
         require(bool(result), 'No mesh triangle primitives in selected scene')
         return result, bind
 
@@ -157,21 +162,21 @@ def weld(p):
     """Stored-identical source attributes, first occurrence; before tangents."""
     keys, keep, remap = {}, [], []
     for k, pos in enumerate(p['pos']):
-        row = pos+(p['normal'][k] if p['normal'] is not None else [])+p['uv'][k]+(p['tangent'][k] if p['tangent'] is not None else [])
+        row = pos+(p['normal'][k] if p['normal'] is not None else [])+p['uv'][k]+(p['tangent'][k] if p['tangent'] is not None else [])+            (p['color'][k] if p.get('color') is not None else [])
         key = struct.pack('<'+'f'*len(row), *row)
         if key not in keys:
             keys[key] = len(keep)
             keep.append(k)
         remap.append(keys[key])
     out = dict(p)
-    for field in ['pos', 'normal', 'tangent', 'uv']:
-        if p[field] is not None:
+    for field in ['pos', 'normal', 'tangent', 'uv', 'color']:
+        if p.get(field) is not None:
             out[field] = [p[field][k] for k in keep]
     out['faces'] = [[remap[x] for x in f] for f in p['faces']]
     return out
 
 
-def vertices(p, center, scale, tile=None):
+def vertices(p, center, scale, tile=None, colours=False):
     nrm = p['normal']
     if nrm is None:
         nrm = [[0.,0.,0.] for _ in p['pos']]
@@ -215,7 +220,11 @@ def vertices(p, center, scale, tile=None):
         uv = p['uv'][i]
         if tile is not None:
             uv = [((tile%2)*1024+2+uv[0]*1020)/2048, ((tile//2)*1024+2+uv[1]*1020)/2048]
-        result.append([(pos[k]-center[k])*scale for k in range(3)]+n+b+t+uv)
+        row = [(pos[k]-center[k])*scale for k in range(3)]+n+b+t+uv
+        if colours:
+            c = p['color'][i] if p.get('color') is not None else [1.0, 1.0, 1.0, 1.0]
+            row += [min(1.0, max(0.0, float(x))) for x in c]
+        result.append(row)
     return result, degenerate
 
 
@@ -245,19 +254,23 @@ def spherical(rows):
 
 
 def model_bytes(rows, faces):
-    require(all(len(r) == 14 and all(math.isfinite(x) for x in r) for r in rows), 'Invalid model vertices')
-    data = (struct.pack('<3i',3,1,len(rows))+b''.join(struct.pack('<14f4B',*r,255,255,255,255) for r in rows)+
+    require(all(len(r) in (14, 18) and all(math.isfinite(x) for x in r) for r in rows), 'Invalid model vertices')
+    rgba = lambda r: [int(round(255*x)) for x in r[14:18]] if len(r) == 18 else [255, 255, 255, 255]
+    data = (struct.pack('<3i',3,1,len(rows))+b''.join(struct.pack('<14f4B',*r[:14],*rgba(r)) for r in rows)+
             struct.pack('<i',len(faces))+b''.join(struct.pack('<3i',*f) for f in faces)+struct.pack('<f',1))
     require(len(data) == 20+60*len(rows)+12*len(faces), 'Model byte length mismatch')
     return data
 
 
-def parse_model(data):
+def parse_model(data, colours=False):
     require(len(data) >= 20 and struct.unpack_from('<2i',data) == (3,1), 'Expected v3 single-frame model')
     count = struct.unpack_from('<i',data,8)[0]
     require(count > 0 and 16+60*count <= len(data), 'Invalid vertex count')
     rows = [list(struct.unpack_from('<14f',data,12+60*i)) for i in range(count)]
-    require(all(data[68+60*i:72+60*i] == b'\xff'*4 for i in range(count)), 'Invalid vertex colors')
+    if colours:
+        rows = [r+[x/255.0 for x in data[68+60*i:72+60*i]] for i, r in enumerate(rows)]
+    else:
+        require(all(data[68+60*i:72+60*i] == b'\xff'*4 for i in range(count)), 'Invalid vertex colors')
     faces_count = struct.unpack_from('<i',data,12+60*count)[0]
     require(faces_count >= 0 and len(data) == 20+60*count+12*faces_count, 'Unparsed/truncated model bytes')
     faces = [list(struct.unpack_from('<3i',data,16+60*count+12*i)) for i in range(faces_count)]
@@ -269,8 +282,10 @@ def parse_model(data):
 def save_model(path, rows, faces):
     data = model_bytes(rows,faces)
     path.write_bytes(data)
-    stored,indices = parse_model(path.read_bytes())
-    require(indices == faces and stored == [[f32(x) for x in r] for r in rows], 'Model read-back mismatch')
+    coloured = any(len(r) == 18 for r in rows)
+    stored,indices = parse_model(path.read_bytes(), coloured)
+    want = [[f32(x) for x in r[:14]] + ([round(255*x)/255.0 for x in r[14:18]] if coloured else []) for r in rows]
+    require(indices == faces and stored == want, 'Model read-back mismatch')
     return {'bytes': len(data), 'vertices': len(rows), 'triangles': len(faces), 'strict_readback': True, 'sha256': hashlib.sha256(data).hexdigest()}
 
 
@@ -439,6 +454,9 @@ def parser():
     p.add_argument('--overlay-uv',choices=['spherical','source'],
                    help='also write <name>-overlay.efkmodel: same vertices with spherical UVs (small meteor) '
                         'or the source UVs before atlasing (big meteor)')
+    p.add_argument('--vertex-colours',action='store_true',
+                   help='write the vertex colours of the mesh (COLOR_0; white where it has none) instead of white: '
+                        'a material reading the vertex colour then sees the gradient of the mesh, as Unreal does')
     p.add_argument('--no-weld',action='store_true',
                    help='keep duplicate vertices; only for reproducing models built before welding '
                         '(generated tangents are then per triangle, which can show facets)')
@@ -481,7 +499,7 @@ def run(args):
         tile = materials.index(p['material']) if len(materials) > 1 else None
         if tile is not None:
             require(all(0 <= x <= 1 for uv in p['uv'] for x in uv), 'Atlas UV outside 0..1')
-        vs,degenerate = vertices(merged,center,scale,tile)
+        vs,degenerate = vertices(merged,center,scale,tile,args.vertex_colours)
         if p['material'] in fit:
             core_indices.extend(range(len(rows),len(rows)+len(vs)))
         faces.extend([[x+len(rows) for x in f] for f in merged['faces']])

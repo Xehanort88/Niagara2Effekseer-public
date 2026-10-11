@@ -14,8 +14,9 @@ import meshimport as m
 WORK = None
 
 
-def write_glb(path, transform=None, animation=False, mode=4, skin=False):
+def write_glb(path, transform=None, animation=False, mode=4, skin=False, colours=None):
     attributes = {'POSITION':[[0,0,0],[1,0,0],[0,1,0]], 'NORMAL':[[0,0,1]]*3,'TEXCOORD_0':[[0,0],[1,0],[0,1]]}
+    if colours: attributes['COLOR_0'] = colours
     binary,views,accessors,indices = bytearray(),[],[],{}
     for name,rows in attributes.items():
         offset = len(binary)
@@ -42,6 +43,19 @@ def write_glb(path, transform=None, animation=False, mode=4, skin=False):
 class Checks(unittest.TestCase):
     def triangle(self):
         return m.GLB(write_glb(WORK/'test.glb')).primitives()[0][0]
+
+    def test_vertex_colours(self):
+        # --vertex-colours: the mesh's COLOR_0 saved and read back as bytes; without it every vertex stays white
+        cols = [[1,0,0,1],[0,1,0,0.5],[0,0,1,0]]
+        p = m.GLB(write_glb(WORK/'colours.glb', colours=cols)).primitives()[0][0]
+        rows,_ = m.vertices(m.weld(p),[0,0,0],1.0,None,True)
+        info = m.save_model(WORK/'colours.efkmodel', rows, p['faces'])
+        stored,_ = m.parse_model((WORK/'colours.efkmodel').read_bytes(), True)
+        self.assertEqual([r[14:] for r in stored], [[1,0,0,1],[0,1,0,128/255],[0,0,1,0]])
+        plain,_ = m.vertices(m.weld(p),[0,0,0],1.0)
+        m.save_model(WORK/'plain.efkmodel', plain, p['faces'])
+        self.assertTrue(info['strict_readback'])
+        m.parse_model((WORK/'plain.efkmodel').read_bytes())          # white required without the flag
 
     def test_glb_read(self):
         p = self.triangle()

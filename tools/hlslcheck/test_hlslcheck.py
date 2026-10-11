@@ -67,6 +67,11 @@ def main():
                                     'subscript'),
         'undeclared uniform': (efkmat(portable, uniforms=()), 'FAIL', 'Tint'),
         'built-in gradient is skipped': (efkmat(portable, required=(1,)), 'SKIP', ''),
+        # the editor's model vertex shader declares 'float4 uv': a local of that name fails there only
+        'local uv (model vertex shader)': (efkmat('$F2$ uv = uv1;\n' + portable.replace('$TEX_P0$uv1', '$TEX_P0$uv')),
+                                           'FAIL', 'model vertex shader'),
+        'local ptuv is fine': (efkmat('$F2$ ptuv = uv1;\n' + portable.replace('$TEX_P0$uv1', '$TEX_P0$ptuv')), 'ok', ''),
+        'local matModel (model vertex shader)': (efkmat('$F1$ matModel = 1.0;\n' + portable), 'FAIL', 'model vertex shader'),
     }
     for name, (data, want, word) in cases.items():
         p = work / (name.replace(' ', '_') + '.efkmat')
