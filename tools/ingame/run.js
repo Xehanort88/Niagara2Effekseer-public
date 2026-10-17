@@ -21,6 +21,15 @@
 //   --override /url=file   serve any URL path from <file> (e.g. /js/reactor_plugins.js)
 //   --prepare "<js>"       run in the page after the new game is set up and
 //                          before the battle scene is created (runtime only)
+//   --preload-id           (no value) add the tested id to the preload plugin's
+//                          extraIds before the battle scene is created, so the
+//                          cold play is the cast a player sees with
+//                          plugins/ReactorEffectPreload.js covering it. Without
+//                          it the tested id is normally NOT preloaded (the plugin
+//                          only loads what the party, troop and troop events
+//                          use) and the freeze is an uncovered cast. Tags get
+//                          -pre. The job fails if the plugin is missing or the
+//                          effect was not loaded before the cold play.
 //   --port N               default 8901; pick one nobody else is using
 //   --chrome <path>        default C:/Program Files/Google/Chrome/Application/chrome.exe
 //   --max-frames N         time mode: frames an animation may play before it
@@ -30,7 +39,7 @@
 //                          240, 260 for a default time-mode job
 //
 // Jobs file: [{ "tag": "...", "id": 317, "mode": "time", "map": {}, "sub": {},
-//              "override": {}, "prepare": "...", "warmup": 1, "troop": 1, "step": 1, "shots": 0,
+//              "override": {}, "prepare": "...", "preloadId": false, "warmup": 1, "troop": 1, "step": 1, "shots": 0,
 //              "maxFrames": 3000, "captureSeconds": 120, "timeout": 240 }]
 // Output: <out>/results.jsonl (one line per job) and <out>/<tag>/ for captures.
 // A capture job first deletes the frame files (f###.rgba, shot-f###.jpg) an
@@ -47,9 +56,11 @@ const { verdict } = require('./verdict');
 
 const argv = process.argv.slice(2);
 const opts = { multi: { map: [], sub: [], override: [] } };
+const FLAGS = ['preload-id'];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (!a.startsWith('--')) throw new Error('unexpected argument ' + a);
+  if (FLAGS.includes(a.slice(2))) { opts[a.slice(2)] = true; continue; }
   const k = a.slice(2), v = argv[++i];
   if (v === undefined) throw new Error('missing value for ' + a);
   if (k in opts.multi) opts.multi[k].push(v); else opts[k] = v;
@@ -66,7 +77,7 @@ const pairs = (list) => Object.fromEntries(list.map((s) => { const i = s.indexOf
 const cliShared = {
   mode: opts.mode || 'time', step: opts.step ? +opts.step : undefined, shots: opts.shots ? +opts.shots : undefined,
   warmup: opts.warmup !== undefined ? +opts.warmup : undefined, troop: opts.troop ? +opts.troop : undefined,
-  prepare: opts.prepare, map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
+  prepare: opts.prepare, preloadId: !!opts['preload-id'], map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
   maxFrames: opts['max-frames'] ? +opts['max-frames'] : undefined,
   captureSeconds: opts['capture-seconds'] ? +opts['capture-seconds'] : undefined,
   timeout: opts.timeout ? +opts.timeout : undefined,
@@ -80,7 +91,7 @@ else {
   const ids = need('ids').split(',').map(Number);
   const repeat = +(opts.repeat || 1);
   jobs = [];
-  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (repeat > 1 ? `-${k}` : ''), id });
+  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (cliShared.preloadId ? '-pre' : '') + (repeat > 1 ? `-${k}` : ''), id });
   jobs = jobs.map((j) => ({ ...cliShared, ...j }));
 }
 jobs.forEach((j, n) => { if (!j.tag) j.tag = `job${n}-${j.id}`; if (!j.mode) j.mode = 'time'; });
@@ -168,7 +179,7 @@ server.listen(port, '127.0.0.1', async () => {
     tally[r.status]++;
     fs.appendFileSync(outFile, JSON.stringify(r) + '\n');
     let line = r.runnerError ? 'RUNNER ERROR ' + r.runnerError : r.timeout ? 'TIMEOUT' : r.pageError ? 'PAGE ERROR ' + r.pageError.slice(0, 300) : 'played';
-    if (r.cold) line += `  freeze ${r.cold.worstFrameDuringLoadMs} ms, load ${r.cold.loadMs} ms, ${r.cold.gameFrames} frames, ended ${r.cold.ended}, frames>20ms ${r.cold.framesOver20ms}`;
+    if (r.cold) line += `  freeze ${r.cold.worstFrameDuringLoadMs} ms (${r.cold.loadedBefore ? 'preloaded' : 'not preloaded'}), load ${r.cold.loadMs} ms, ${r.cold.gameFrames} frames, ended ${r.cold.ended}, frames>20ms ${r.cold.framesOver20ms}`;
     if (r.capture) line += `  ${r.capture.frames} frames captured, ended ${r.capture.ended}`;
     if (r.clearedStaleFrames) line += `  (deleted ${r.clearedStaleFrames} frame file(s) left by an earlier run of this tag)`;
     if (r.preload) line += `  preload ${r.preload.requested.length} effect(s), battle ready after ${r.preload.readyMs} ms${r.preload.timedOut ? ' (timed out)' : ''}`;

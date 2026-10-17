@@ -17,7 +17,9 @@ Steps, each of which stops the install on failure:
      sounds, flashes and timings stay; the old file is left for you to delete).
      The file is re-read just before writing and the write is refused if it changed since it was read (another
      session may be editing it); the file's own line format (one entry per line, CRLF or LF) is kept;
-  6. with --ingame, play it twice in a real battle with tools/ingame/run.js and report freeze, frames, ended.
+  6. with --ingame, play it twice in a real battle with tools/ingame/run.js and report freeze, frames, ended:
+     once as an uncovered cast (not preloaded) and, when the project has js/plugins/ReactorEffectPreload.js, once with
+     the id preloaded (run.js --preload-id), the first-cast freeze a player sees with the plugin covering it.
 Standard library only. Prints the animation id.
 """
 import argparse, hashlib, json, re, shutil, subprocess, sys
@@ -201,13 +203,20 @@ def main():
 
     if a.ingame:
         print('5. in-game run')
-        r = run(['node', ROOT / 'tools/ingame/run.js', '--project', project, '--out', work / 'ingame', '--ids', anim_id,
-                 '--repeat', 2, '--port', a.port], cwd=ROOT)
-        for line in r.stdout.splitlines():
-            if line.startswith('time-') or line.startswith('INGAME'):
-                print('  ' + re.sub(r'\s+', ' ', line))
-        if r.returncode != 0:
-            fail('in-game run exit %d' % r.returncode)
+        cases = [('not preloaded (uncovered cast)', [])]
+        if (project / 'js/plugins/ReactorEffectPreload.js').is_file():
+            cases.append(('preloaded (ReactorEffectPreload)', ['--preload-id']))
+        else:
+            print('  (no js/plugins/ReactorEffectPreload.js in the project: preloaded case not measured)')
+        for label, extra in cases:
+            print('  ' + label + ':')
+            r = run(['node', ROOT / 'tools/ingame/run.js', '--project', project, '--out', work / 'ingame', '--ids', anim_id,
+                     '--repeat', 2, '--port', a.port] + extra, cwd=ROOT)
+            for line in r.stdout.splitlines():
+                if line.startswith('time-') or line.startswith('INGAME'):
+                    print('    ' + re.sub(r'\s+', ' ', line))
+            if r.returncode != 0:
+                fail('in-game run exit %d' % r.returncode)
     print('INSTALL OK: %s as animation %d' % (dest, anim_id))
 
 

@@ -530,7 +530,7 @@ def run(args):
               'main_whole_bounds':bounds([x for p in main for x in p['pos']]),'main_core_bounds':fit_bounds,
               'geometry_whole_bounds':bounds([x for p in source for x in p['pos']]),
               'geometry_core_bounds':bounds([x for p in source if p['material'] in fit for x in p['pos']]),
-              'saved_bounds':bounds([r[:3] for r in parse_model((args.out/'Model'/(args.name+'.efkmodel')).read_bytes())[0]]),
+              'saved_bounds':bounds([r[:3] for r in parse_model((args.out/'Model'/(args.name+'.efkmodel')).read_bytes(),args.vertex_colours)[0]]),
               'saved_core_bounds':bounds([[f32(x) for x in rows[i][:3]] for i in core_indices]),
               'sections':sections,'models':models,'textures':textures,'map_roles':roles,
               'surface_missing_roles':[r for r in ['roughness','metallic','ao'] if r not in roles],

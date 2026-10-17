@@ -119,6 +119,26 @@ def saved_curve(path, group, axis):
             for tag, _, children in keys if tag.startswith("Key")]
 
 
+def parameter_material(path):
+    """Generated material declarations, independent of the port writer (stdlib)."""
+    def ints(*v):
+        return struct.pack('<' + 'i' * len(v), *v)
+    def string(v):
+        b = v.encode() + b'\0'
+        return ints(len(b)) + b
+    def chunk(tag, b):
+        return tag + ints(len(b)) + b
+    prm = ints(1, 0, 0, 0, 0, 0, 1)
+    prm += string('Display texture') + string('nodeTex') + string('') + ints(0, 0, 1, 1, 0)
+    prm += ints(4)
+    for i in range(4):
+        prm += string('Display %d' % i) + string('nodeValue%d' % (i + 1)) + ints(i, i, i)
+        prm += struct.pack('<4f', 0, 0, 0, 0)
+    prm += ints(0, 0)
+    code = '$F3$ emissive = nodeValue4.xyz;\n'
+    path.write_bytes(b'EFKM' + ints(1710) + bytes(8) + chunk(b'PRM_', prm) + chunk(b'GENE', string(code)))
+
+
 class Suite:
     def __init__(self, commands, label, dll, directory):
         self.commands, self.label, self.dll, self.directory = commands, label, dll, directory
@@ -157,6 +177,53 @@ class Suite:
         result = self.tool("dump", path, "0")
         require(not result.stderr.strip(), f"dump stderr: {result.stderr}")
         return result.stdout
+
+    def material_values(self, bad=None):
+        folder = self.directory / 'material-fixture'
+        folder.mkdir(exist_ok=True)
+        material = folder / 'fixture.efkmat'
+        parameter_material(material)
+        texture = folder / 'node.png'
+        png(texture, 0x71)
+        prefix = 'RendererCommonValues/MaterialFile/'
+        settings = {'RendererCommonValues/Material': 'File', prefix + 'Path': str(material),
+                    prefix + 'Uniforms/nodeValue1': 0.125, prefix + 'Uniforms/nodeValue2': [2, -3],
+                    prefix + 'Uniforms/nodeValue3': [4, 5, 6], prefix + 'Uniforms/nodeValue4': [7, 8, 9, 0],
+                    prefix + 'Textures/nodeTex': str(texture)}
+        if bad == 'name':
+            settings[prefix + 'Uniforms/Display 1'] = 1
+        elif bad == 'width':
+            settings[prefix + 'Uniforms/nodeValue4'] = [1, 2, 3]
+        elif bad == 'kind':
+            settings[prefix + 'Textures/nodeValue1'] = str(texture)
+        elif bad == 'missing_texture':
+            settings[prefix + 'Textures/nodeTex'] = str(folder / 'absent.png')
+        elif bad == 'nonfinite':
+            settings[prefix + 'Uniforms/nodeValue4'] = [1e39, 0, 0, 0]
+        elif bad == 'not_file':
+            settings['RendererCommonValues/Material'] = 'Default'
+        spec = self.spec({'node': '0', 'set': settings})
+        if bad:
+            result = self.edit(spec, code=1)
+            contains(result.stderr, {'name': 'unknown or ambiguous', 'kind': 'unknown or ambiguous',
+                                    'width': 'cannot set a Vector4D', 'missing_texture': 'no such file',
+                                    'nonfinite': 'expected finite floats', 'not_file': 'require Material File'}[bad])
+            return
+        spec['edits'] += [{'node': 'root', 'add': {'from': '0', 'name': 'Other'}, 'set': {
+            prefix + 'Uniforms/nodeValue4': [0.2, 0.3, 0.4, 0.5]}},
+            {'node': '0', 'set': {prefix + 'Uniforms/nodeValue1': 0.375}}]
+        out = self.edit(spec)
+        dump = self.dump(out)
+        for name, value in [('nodeValue1', '0.375'), ('nodeValue2', '(2, -3)'),
+                            ('nodeValue3', '(4, 5, 6)'), ('nodeValue4', '(7, 8, 9, 0)')]:
+            self.line(dump, prefix + 'Uniforms/' + name, value)
+        self.line(dump, prefix + 'Textures/nodeTex', 'node.png')
+        other = self.tool('dump', out, '1').stdout
+        self.line(other, prefix + 'Uniforms/nodeValue4', '(0.2, 0.3, 0.4, 0.5)')
+        require((out.parent / 'Texture/node.png').read_bytes() == texture.read_bytes(), 'material texture bytes differ')
+        # Reloading and recopying must preserve node values, not restore defaults.
+        again = self.edit(self.spec(source=out))
+        self.line(self.dump(again), prefix + 'Uniforms/nodeValue4', '(7, 8, 9, 0)')
 
     def line(self, dump, key, value):
         require(f"{key} = {value}" in dump.splitlines(), f"missing dump line: {key} = {value}")
@@ -487,13 +554,14 @@ class Suite:
         out = self.edit({"source": str(source), "retime": {"factor": 2}, "edits": []})
         dump = self.dump(out)
         self.line(dump, "CommonValues/Life", "120")
-        offset = "CommonValues/" + ("Generation/" if self.label == "1.80.3" else "") + "GenerationTimeOffset"
+        offset = "CommonValues/" + ("Generation/" if self.label == "1.8" else "") + "GenerationTimeOffset"
         self.line(dump, offset, "10")
         self.line(dump, TIME_CURVE, "fcurve[0:1 20:3 40:2]")
         self.line(dump, SCALE + "/Timeline", "Time")
         self.line(dump, TIME_CURVE + "/Sampling", "1")
-        self.line(dump, TIME_CURVE + "/OffsetMin", "4")
-        self.line(dump, TIME_CURVE + "/OffsetMax", "8")
+        # Value offsets, not time: retime leaves them as they were.
+        self.line(dump, TIME_CURVE + "/OffsetMin", "2")
+        self.line(dump, TIME_CURVE + "/OffsetMax", "4")
         for line in before.splitlines():
             if line.startswith(LOCATION + "/"):
                 contains(dump, line)
@@ -518,20 +586,32 @@ class Suite:
         contains(result.stdout, "VERIFY OK")
         self.line(self.dump(out), "CommonValues/Life", "92")
 
-    def lint(self, points, sampling, code, frame=None, intended=None, played=None):
+    def lint(self, points, sampling, code, frame=None, intended=None, played=None,
+             runtime=None, off_grid=None, short_tail=None):
         out = self.edit(self.spec({"node": "0", "set": {
             "LocationValues/Type": "LocationFCurve", LOCATION + "/Timeline": "Time",
             CURVE + "/Sampling": sampling}, "keys": [{"curve": CURVE, "points": points}]}))
         report = out.with_suffix(".lint.json")
-        self.tool("lint", out, "--json", report, code=code)
+        result = self.tool("lint", out, "--json", report, *(["--runtime", runtime] if runtime else []), code=code)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        expected_runtime = runtime or "1.80.7"
+        require(data["Runtime"] == expected_runtime, f"report runtime {data['Runtime']}, expected {expected_runtime}")
+        contains(result.stdout, f"(runtime {expected_runtime})")
+        curves = [c for c in data["Effects"][0]["Curves"] if c["CurvePath"] == CURVE]
+        if off_grid is not None:
+            require(curves[0]["OffGridKeys"] == off_grid, f"off-grid keys {curves[0]['OffGridKeys']}, expected {off_grid}")
+        if short_tail is not None:
+            require(curves[0]["ShortTail"] == short_tail, f"short tail {curves[0]['ShortTail']}, expected {short_tail}")
         if frame is None:
             return
-        text = report.read_text(encoding="utf-8")
-        curves = [c for c in json.loads(text)["Effects"][0]["Curves"] if c["CurvePath"] == CURVE]
         worst = curves[0]["LargestDifference"]
         require(worst["Frame"] == frame, f"largest difference at {worst['Frame']}, expected {frame}")
         require(abs(worst["Intended"] - intended) < 1e-3 and abs(worst["Played"] - played) < 1e-3,
                 f"intended/played {worst['Intended']}/{worst['Played']}, expected {intended}/{played}")
+
+    def lint_unknown_runtime(self):
+        result = self.tool("lint", self.base, "--runtime", "1.80.5", code=2)
+        contains(result.stderr, "unknown runtime 1.80.5")
 
     def lint_incomplete(self, findings, strict, code):
         """A folder with one readable effect and one unreadable file: unreadable
@@ -634,9 +714,19 @@ class Suite:
         yield "retime_integer_rounding", self.rounding
         yield "lint_off_grid_time_keys", lambda: self.lint(
             [[0, 8], [9, 17], [42, 17], [50, 0]], 10, 1, 42, 17, 13.6)
-        # The runtime spreads a shortened final interval over a full Sampling.
-        yield "lint_short_final_interval", lambda: self.lint(
-            [[0, 0], [45, 10]], 10, 1, 44, 88 / 9, 80 / 9 + 10 / 9 * 0.4)
+        # 1.80.3 spreads a shortened final interval over a full Sampling.
+        yield "lint_short_final_interval_1803", lambda: self.lint(
+            [[0, 0], [45, 10]], 10, 1, 44, 88 / 9, 80 / 9 + 10 / 9 * 0.4,
+            runtime="1.80.3", off_grid=[45], short_tail=5)
+        # 1.80.7 (the default) plays it at its real length: a short tail alone is clean.
+        yield "lint_short_tail_clean_1807_default", lambda: self.lint(
+            [[0, 0], [45, 10]], 10, 0, off_grid=[], short_tail=5)
+        # ...but an inner off-grid key is still a finding, and the tail 40..45 plays over 5 units:
+        # at 42 the line from 40 (400/42) to 45 (0) gives 400/42 * 3/5, where 1.80.3 gives * 8/10.
+        yield "lint_short_tail_played_1807", lambda: self.lint(
+            [[0, 0], [42, 10], [45, 0]], 10, 1, 42, 10, 400 / 42 * 0.6,
+            runtime="1.80.7", off_grid=[42], short_tail=5)
+        yield "lint_unknown_runtime_exit_2", self.lint_unknown_runtime
         yield "lint_sampling_1_clean", lambda: self.lint([[0, 8], [9, 17], [42, 17], [50, 0]], 1, 0)
         # Unreadable targets stay non-fatal by default (documented contract).
         yield "lint_unreadable_default_exit_0", lambda: self.lint_incomplete(False, False, 0)
@@ -648,6 +738,9 @@ class Suite:
         yield "lint_strict_complete_exit_0", self.lint_strict_complete
         yield "lint_incomplete_corpus_noted", self.lint_incomplete_corpus
         yield "source_fixtures_unchanged", self.unchanged
+        yield "material_uniforms_float1_to_float4_textures_and_copy", self.material_values
+        for bad in ('name', 'width', 'kind', 'missing_texture', 'nonfinite', 'not_file'):
+            yield 'material_' + bad + '_refused', lambda bad=bad: self.material_values(bad)
 
 
 def main():
@@ -665,7 +758,7 @@ def main():
     passed = failed = 0
     suites = {}
     try:
-        for label, project in [("1.70e", "Niagara2Efk"), ("1.80.3", "Niagara2Efk1803")]:
+        for label, project in [("1.70e", "Niagara2Efk"), ("1.8", "Niagara2Efk1803")]:
             try:
                 dll = commands.build(label, project)
                 suite = Suite(commands, label, dll, run / label)
@@ -684,7 +777,7 @@ def main():
                     failed += 1
         if len(suites) == 2:
             try:
-                old, new = suites["1.70e"], suites["1.80.3"]
+                old, new = suites["1.70e"], suites["1.8"]
                 result = old.tool("dump", new.base, code=3)
                 contains(result.stderr, "newer than 1.70")
                 require("unexpected error" not in result.stderr.lower(), "version error used generic exception reporting")

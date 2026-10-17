@@ -1,8 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Wrapper around the pristine Effekseer 1.80.3 checkout (tag 1803) in
-    external/Effekseer1803, the version of the web runtime the test project runs.
+    Wrapper around the pristine Effekseer 1.80.7 checkout (tag 1807, b87d1a2e) in
+    external/Effekseer1803, the version the game projects' web runtimes and the
+    user's preview editor run since 2026-10-17. The folder and project names still
+    say 1803 (the tag they were first pinned to): scripts and notes reach the build
+    by those paths, and the binary format is the same 1810.
 
     Same approach as EffekseerCore170e: glob the upstream sources rather than use
     or edit upstream's project file, so the checkout stays byte-identical to the

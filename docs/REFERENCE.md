@@ -45,11 +45,16 @@ git submodule update --init --depth 1
 dotnet build src/Niagara2Efk/Niagara2Efk.csproj -c Release -p:Platform=x64
 ```
 
-### Two builds: Effekseer 1.70e and 1.80.3
+### Two builds: Effekseer 1.70e and 1.8
 
-The same sources also build against Effekseer **1.80.3** (tag `1803`, checked out
-at `external/Effekseer1803`), through `src/EffekseerCore1803` and
-`src/Niagara2Efk1803`:
+The same sources also build against Effekseer **1.80.7** (tag `1807`, commit
+`b87d1a2e`, checked out at `external/Effekseer1803`), through
+`src/EffekseerCore1803` and `src/Niagara2Efk1803`. The names still say `1803`,
+the tag this build was pinned to until 2026-10-17; they were kept because scripts
+across `out/edits/` and the builders reach the 1.8 build by those paths. Upstream's
+`EffekseerCore` differs between 1803 and 1807 only in `Core.Version` (the
+`ToolVersion` a save stamps and the newest one a load accepts), a node-rename
+editor event and a logger guard; the binary stays version 1810.
 
 ```bash
 dotnet build src/Niagara2Efk1803/Niagara2Efk1803.csproj -c Release
@@ -63,8 +68,26 @@ Pick the build by the runtime of the project the effect is for:
 | `src/Niagara2Efk1803/bin/Release/net9.0/Niagara2Efk.dll` | binary version **1810** | 1.8 runtimes only |
 
 Only the 1.8 build can open files saved by the 1.8 editor, and only it can set
-1.8 features. `ASSEMBLER TEST PROJECT` runs the 1.80.3 web runtime since
-2026-09-27; `REACTOR DRAFT PROJECT` still runs 1.70.
+1.8 features. A core refuses a file whose `ToolVersion` is newer than its own
+("Version Error", exit 3), so the 1.8 build reads files the 1.80.7 editor saved,
+and its own saves (stamped 1.80.7) need an editor of at least 1.80.7.
+`ASSEMBLER TEST PROJECT`, `REACTOR DRAFT PROJECT` and the RPGReactor source
+repo's `runtime/libs`, `editor/libs` and `template/Demo` run the **1.80.7** web runtime
+since 2026-10-17 (1.80.3 from 2026-09-27/29). The 1.80.3 files are kept in
+`out/runtime-backup/effekseer-1.80.3/`. The user's preview editor is 1.80.7 too (since 2026-10-17). The binary format is the same (1810) from 1.80.3 to
+1.80.7.
+
+1.80.7 plays two things differently from 1.80.3 and 1.70e, both upstream fixes
+(`out/edits/runtime-1807-check/REPORT.md`; all 444 test-project effects load, draw and
+end on the same frame under both):
+
+- **"Simple" turbulence force fields** (LightCurlNoise) are normalised (#1166): particles
+  drift along different paths with about the same strength.
+- **A curve whose key span is not a multiple of its `Sampling`** (#1164): 1.80.3 spreads
+  the shorter last segment over a full `Sampling`, then snaps to the last key. 1.80.7 plays
+  it over its real length. Curves sampled every unit (what `keys`/`shift` write) are
+  unaffected. `lint --runtime` picks which playback it checks against; the default is
+  1.80.7 (§ Checking curve timing).
 
 `src/Niagara2Efk/EfkCompat.cs` holds every difference between the two cores.
 1.8 moved six `CommonValues` settings into new groups and kept the old names as
@@ -741,9 +764,7 @@ divide by its square. Random ranges are retained. Integer durations and key
 frames round to nearest (ties to even); every non-exact rounding is printed.
 Set `endFrame` explicitly to override the scaled editor preview end.
 
-Time FCurves scale key frames, both handle X coordinates and the curve's random
-start offset (`OffsetMin`/`OffsetMax`, which the runtime subtracts from the age,
-so on a Time curve it is frames; `dump` prints it when set) while preserving
+Time FCurves scale key frames and both handle X coordinates while preserving
 values, handle Y and interpolation, and use `Sampling` 1 through the same
 helper as `keys`/`shift`. Percent keys and their Sampling remain unchanged:
 they follow the stretched lifetime. Existing Percent keys outside 0..100 print
@@ -751,6 +772,13 @@ a warning because they never play. Saved curves are checked for frames,
 values, handles, interpolation, Timeline and Sampling. Per-node edits run
 after retime and can override it; a foreign `add` subtree arrives afterwards
 and is not retimed, while an in-project copy inherits its already retimed source.
+
+A curve's `OffsetMin`/`OffsetMax` (`dump` prints them when set) are not time and
+retime leaves them alone: the runtime adds one random pick from that range to the
+curve's value for each particle (`FCurve::GetOffset`; rotation, location, scale,
+colour, alpha cutoff, UV and custom data curves). They are in the runtime's units,
+which differ from the keys' for rotation: keys are degrees, the offset is radians
+(the writer multiplies keys by pi/180 but stores the offset as it is).
 
 Unsupported controls print node/path warnings and remain unchanged: dynamic
 equations, velocity-dependent Vortex/Turbulence/Drag/AttractiveForce strengths,
@@ -795,6 +823,16 @@ the node's life, `Time` reads them as frames. Keys meant as frames on a Percent
 curve play at the wrong time; set `Timeline` to `Time` in the same op.
 Whole-number fields also take a JSON float with no fraction (`60.0`, as Python
 writes it); `2.5` is refused.
+
+File materials accept named per-node values in `set`, on both builds. Set
+`RendererCommonValues/Material` to `File` and `RendererCommonValues/MaterialFile/Path`
+first, then `RendererCommonValues/MaterialFile/Uniforms/<UniformName>` to a number
+(float1) or an array of exactly 2, 3 or 4 finite floats matching the declaration.
+Use `RendererCommonValues/MaterialFile/Textures/<UniformName>` for a texture path,
+absolute or relative to the spec, copied beside the output like other resources.
+The names are the material's shader parameter names, case-sensitive, not display
+labels. Unknown, ambiguous or wrong-kind names are refused. `dump` prints these
+same paths; `edit` reloads and compares every requested value after resource copying.
 
 An unknown key anywhere in a spec (`"ops"` for `"edits"`, `"sets"` for `"set"`,
 `"frm"` in a `shift`) is an error that names the key, where it is, and the keys
@@ -1463,16 +1501,27 @@ keys outside 0..100, naming the node, curve, Timeline, Sampling and offending
 keys. For off-grid curves it also gives the largest difference between the
 authored curve (Effekseer's own `GetValue`, Bezier included) and what the
 runtime plays, at every integer curve unit; JSON adds intended/played values at
-each off-grid key, offsets, full key/handle data and unreadable files. The last
-key is checked against the grid too, though it is always sampled, so such a
-finding can show zero difference. Lint does not guess whether Percent keys were
-meant as frames.
+each off-grid key, offsets, full key/handle data and unreadable files. Lint
+does not guess whether Percent keys were meant as frames.
 
-The played model is the runtime's, not a plain join of the samples: when the
-curve length isn't a multiple of Sampling, the final, shorter interval still
-plays spread over a full Sampling and then snaps to the last key on its frame
-(the short-interval branch in `FCurve::GetValue` is unreachable in both pinned
-runtimes). These are curve measurements, not a substitute for rendering.
+The played model is the runtime's, not a plain join of the samples, and it
+depends on `--runtime 1.80.3|1.80.7` (default **1.80.7**: every game project and
+the RPGReactor source runtime play 1.80.7 since 2026-10-17). It matters only for
+a curve whose length isn't a multiple of Sampling, a *short tail* (JSON
+`ShortTail` = the last segment's length, 0 for none):
+
+- **1.80.7** plays the last, shorter segment over its real length (upstream
+  #1164), so the last key is never a finding; a short-tail curve is reported
+  only for other off-grid keys.
+- **1.80.3** (also right for 1.70e) spreads that segment over a full Sampling
+  and then snaps to the last key on its frame (the short-interval branch in
+  `FCurve::GetValue` is unreachable there), so the last key is listed as
+  off-grid. Use it for a 1.80.3 or 1.70 runtime, or to see how the user's 1.80.3
+  preview editor plays the effect. Its findings include every 1.80.7 finding.
+
+The runtime is printed on the `Runtime:` and `LINT:` lines and stored as
+`Runtime` in the JSON report. These are curve measurements, not a substitute
+for rendering.
 
 With `--catalogue`, an identical keys + Sampling + Timeline signature anywhere
 in the catalogue marks the curve `pack`; otherwise it is `ours`. Key identity
@@ -1574,6 +1623,24 @@ thread). It also reports `loadMs`, `gameFrames` until the animation ended,
 The second play is cached and times the draw with `gl.finish` around it. A
 stock warm-up animation (`--warmup`, default 1) plays first so the runtime's
 one-time start-up cost is not charged to the effect.
+
+Which first cast that is depends on the preload plugin
+(`plugins/ReactorEffectPreload.js`, § Battle effect preload plugin). It loads only
+what the battle can play: the party's skills and items, the troop's actions and
+troop events. The animation under test is normally none of those, so by default
+the freeze is an **uncovered cast** (`cold.loadedBefore: false`): what a player
+sees when the plugin does not know the effect is coming. `--preload-id` (jobs
+file `"preloadId": true`) adds the tested id to the plugin's `extraIds` before
+the battle scene is created, and the freeze becomes the cast a player sees with
+the plugin covering it; the effect's load moves behind the battle transition
+(`preload.readyMs`). The results line says which (`freeze N ms (preloaded)` or
+`(not preloaded)`), the line carries `preloadId`, and CLI tags get `-pre`. A
+`--preload-id` job fails when the project does not run the plugin or the effect
+was still not loaded when the cold play started. Material shaders dominate the
+gap: OT2 HP Recovery r1015 (animation 477, four `.efkmat` = eight programs
+compiled at load) froze about 250 ms uncovered and 6 ms preloaded
+(`out/edits/firstcast-freeze-20261015/NOTES.md`). Quote both numbers, and say
+which is which.
 
 Capture mode (`--mode capture`, `--step N`, `--shots N`) saves what the player
 sees every Nth game frame as raw RGBA, at half resolution. While an effect plays,
@@ -1688,7 +1755,8 @@ into `<project>/effects/<dest>.efkefc` (textures beside it in the folder's share
 appends the animation to `data/Animations.json` in the file's own one-entry-per-line
 format, re-reading the file just before writing and refusing if another session
 changed it meanwhile, and with `--ingame` plays it twice in a real battle with
-`tools/ingame/run.js`. A regenerated texture that clashes with a stale same-named
+`tools/ingame/run.js`, once uncovered and, when the project has
+`js/plugins/ReactorEffectPreload.js`, once more with `--preload-id`, printing both freezes. A regenerated texture that clashes with a stale same-named
 copy in the project fails the read-back with an explanation. `--tool` picks the
 `Niagara2Efk.dll`. Its test: `python tools/install/test_install.py --work out/tests/install`.
 

@@ -85,6 +85,10 @@ namespace Niagara2Efk
 		static void DumpObject(object o, string prefix, int depth, HashSet<object> seen)
 		{
 			if (o == null || depth > 8 || !seen.Add(o)) return;
+			if (o is MaterialFileParameter material)
+				foreach (var slot in material.GetValueStatus().Where(s => s.IsShown))
+					if (TryDescribe(slot.Value, out var value))
+						Console.WriteLine(prefix + (slot.Value is Effekseer.Data.Value.PathForImage ? "/Textures/" : "/Uniforms/") + slot.Key.UniformName + " = " + value);
 			bool keyed = false;
 			foreach (var prop in o.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
 			{
@@ -106,8 +110,9 @@ namespace Niagara2Efk
 						// How often the runtime samples the curve: 1 follows it
 						// exactly, the default 10 steps through it.
 						Console.WriteLine(path + "/Sampling = " + c.Sampling.Value.ToString(CultureInfo.InvariantCulture));
-						// A random start offset, in the keys' units, subtracted from the
-						// age before the curve is read. Printed only when set.
+						// A random offset added to the curve's value, one pick per particle,
+						// in the runtime's units (a rotation's in radians while its keys are
+						// degrees). Printed only when set.
 						foreach (string offset in new[] { "OffsetMin", "OffsetMax" })
 							if (c.GetType().GetProperty(offset)?.GetValue(c) is Effekseer.Data.Value.Float off && off.Value != 0)
 								Console.WriteLine(path + "/" + offset + " = " + F(off.Value));

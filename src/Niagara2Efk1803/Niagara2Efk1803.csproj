@@ -2,10 +2,10 @@
 
   <!--
     The same tool (every source file of src/Niagara2Efk), built against Effekseer
-    1.80.3 instead of 1.70e. Output is .efkefc binary version 1810, which only a
-    1.8 runtime plays (the test project since 2026-09-27; the draft project still
-    runs 1.70, so keep using the 170e build for it). EFK18 gates the few places
-    where the two cores differ.
+    1.80.7 (tag 1807; the name still says 1803, its first pin) instead of 1.70e.
+    Output is .efkefc binary version 1810, which only a 1.8 runtime plays, with
+    ToolVersion 1.80.7 in the EDIT chunk, which an editor older than 1.80.7
+    refuses. EFK18 gates the few places where the two cores differ.
   -->
 
   <PropertyGroup>

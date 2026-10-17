@@ -10,7 +10,8 @@
 // --project adds live cases in that game (read-only, stock animation 3): a clean
 // run, then each failure path forced inside the real game (broken effect file,
 // engine exception, page error, animation cut off by --max-frames and
-// --capture-seconds), and a capture rerun over stale frames compared live.
+// --capture-seconds), a capture rerun over stale frames compared live, and
+// --preload-id (the project must run plugins/ReactorEffectPreload.js).
 // Every file goes under --work, in a fresh run-* folder.
 const fs = require('fs'), path = require('path'), assert = require('assert');
 const { spawnSync } = require('child_process');
@@ -62,6 +63,14 @@ test('verdict_load_pending_fails', () => {
   assert.match(verdict(r).failures.join(), /cold play: effect never finished loading/);
 });
 test('verdict_preload_timeout_warns', () => { const v = verdict({ ...okTime(), preload: { timedOut: true } }); assert.strictEqual(v.status, 'warn'); assert.deepStrictEqual(v.failures, []); });
+test('verdict_preload_id_needs_loaded_cold_play', () => {
+  const r = { ...okTime(), preloadId: true };
+  assert.match(verdict(r).failures.join(), /cold play: --preload-id, but the effect was not loaded before the cast/);
+  r.cold.loadedBefore = true;
+  assert.strictEqual(verdict(r).status, 'ok');
+  // Without --preload-id an uncovered cast is the normal case, not a failure.
+  assert.strictEqual(verdict(okTime()).status, 'ok');
+});
 test('verdict_console_error_warns', () => assert.strictEqual(verdict({ ...okTime(), console: { 'error: x': 2, 'warn: y': 1 } }).status, 'warn'));
 
 // ---- compare ---------------------------------------------------------------
@@ -259,6 +268,28 @@ if (!opts.noChrome) {
     const { lines } = runjs('never-ended', project('never', postResult(r)), ['--ids', '1', '--timeout', '60'], 1);
     assert.match(lines[0].failures.join(), /cold play: animation did not end within 3000 frames/);
   });
+  // The page echoes the job it was given, so the flag's path from the CLI and a
+  // jobs file to page.js is checked without a game.
+  const echoJob = (cold) => `<script>fetch('/__job.json').then((r) => r.json()).then((j) => {
+    const r = ${JSON.stringify(okTime())}; delete r.tag; r.preloadId = j.preloadId; Object.assign(r.cold, ${JSON.stringify(cold)});
+    fetch('/__result', { method: 'POST', body: JSON.stringify(r) }); });</script>`;
+  test('run_preload_id_flag_reaches_page', () => {
+    const { stdout, lines } = runjs('preload-id', project('preload', echoJob({ loadedBefore: true, worstFrameDuringLoadMs: 6 })), ['--ids', '1', '--preload-id', '--timeout', '60'], 0);
+    assert.deepStrictEqual([lines[0].tag, lines[0].preloadId, lines[0].status], ['time-1-pre', true, 'ok']);
+    assert.match(stdout, /freeze 6 ms \(preloaded\)/);
+  });
+  test('run_without_preload_id_says_not_preloaded', () => {
+    const { stdout, lines } = runjs('no-preload-id', project('nopreload', echoJob({ loadedBefore: false, worstFrameDuringLoadMs: 250 })), ['--ids', '1', '--timeout', '60'], 0);
+    assert.deepStrictEqual([lines[0].tag, lines[0].preloadId, lines[0].status], ['time-1', false, 'ok']);
+    assert.match(stdout, /freeze 250 ms \(not preloaded\)/);
+  });
+  test('run_jobs_file_preload_id_not_loaded_fails', () => {
+    const jobs = path.join(WORK, 'jobs-preload.json');
+    fs.writeFileSync(jobs, JSON.stringify([{ tag: 'pre', id: 1, preloadId: true }]));
+    const { lines } = runjs('preload-jobs', project('preload-miss', echoJob({ loadedBefore: false })), ['--jobs', jobs, '--timeout', '60'], 1);
+    assert.deepStrictEqual([lines[0].preloadId, lines[0].status], [true, 'fail']);
+    assert.match(lines[0].failures.join(), /--preload-id, but the effect was not loaded/);
+  });
   test('run_bad_limits_usage_exit_2', () => {
     const proj = project('limits', 'no game here');
     for (const args of [['--max-frames', '0'], ['--capture-seconds', 'x'], ['--timeout', '-5']]) {
@@ -314,6 +345,20 @@ if (opts.project && !opts.noChrome) {
     const r = node('compare.js', ['--out', path.join(WORK, 'run', 'live-capcut'), '--base', `capture-${ID}`, `capture-${ID}`]);
     assert.strictEqual(r.status, 1, r.stdout);
     assert.match(r.stdout, /UNUSABLE: job failed: capture: animation did not end/);
+  });
+  // Both cases of the first-cast freeze: --preload-id must leave the effect
+  // loaded before the cold play (the plugin's extraIds), and fail loudly when
+  // the project does not run the plugin instead of timing an uncovered cast.
+  test('live_preload_id_preloads', () => {
+    const { lines } = runjs('live-preload', P, ['--ids', ID, '--preload-id'], 0);
+    assert.deepStrictEqual([lines[0].status, lines[0].preloadId, lines[0].cold.loadedBefore], ['ok', true, true]);
+    assert.ok(lines[0].preload && lines[0].preload.requested.includes(lines[0].cold.effectName), JSON.stringify(lines[0].preload));
+  });
+  test('live_preload_id_without_plugin_fails', () => {
+    const empty = path.join(WORK, 'no-preload-plugin.js');
+    fs.writeFileSync(empty, '// stands in for ReactorEffectPreload.js: no plugin');
+    const { lines } = runjs('live-preload-missing', P, ['--ids', ID, '--preload-id', '--override', `/js/plugins/ReactorEffectPreload.js=${empty}`], 1);
+    assert.match(lines[0].failures.join(), /page error: .*--preload-id: the project does not run plugins\/ReactorEffectPreload.js/);
   });
   test('live_capture_rerun_over_stale_frames', () => {
     const out = path.join(WORK, 'run', 'live-cap');

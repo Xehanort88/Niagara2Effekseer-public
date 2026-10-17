@@ -2,7 +2,8 @@
 // Shared by run.js (exit status) and compare.js (is a capture usable evidence).
 //
 // failures: the job did not measure what it was asked to (timeout, page or
-//   engine error, effect load error, animation never started or never ended).
+//   engine error, effect load error, animation never started or never ended,
+//   a --preload-id cold play whose effect was not loaded before the cast).
 // warnings: the job measured it, but something around it needs a look (console
 //   errors, the preload plugin timing out). They never change the exit status.
 function verdict(r) {
@@ -24,6 +25,9 @@ function verdict(r) {
     else if (!p.ended) failures.push(`${k} play: animation did not end within ${p.frameLimit || 3000} frames (--max-frames)`);
   }
   if (r.cold && !r.warm && measured) failures.push('time mode result has no warm play');
+  // --preload-id asked for the covered cast; a cold play that still loaded the
+  // effect measured the uncovered one (plugin disabled, preload failed or not done).
+  if (r.preloadId && r.cold && measured && !r.cold.loadedBefore) failures.push('cold play: --preload-id, but the effect was not loaded before the cast (preload plugin disabled, failed or still loading)');
   if (r.capture) {
     if (!(r.capture.frames >= 0)) failures.push('capture: animation never started (no frame captured)');
     else if (!r.capture.ended) failures.push(`capture: animation did not end within ${r.capture.captureSeconds || 120} s (--capture-seconds; capture is incomplete)`);

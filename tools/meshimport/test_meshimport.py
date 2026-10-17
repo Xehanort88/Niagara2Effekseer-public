@@ -57,6 +57,16 @@ class Checks(unittest.TestCase):
         self.assertTrue(info['strict_readback'])
         m.parse_model((WORK/'plain.efkmodel').read_bytes())          # white required without the flag
 
+    def test_vertex_colours_cli_bounds(self):
+        # The report's saved_bounds reads the saved model back with the same flag: read as a white-only model, a
+        # coloured one failed the import after it was written ('Invalid vertex colors', TS Geodesic's wire mesh)
+        glb = write_glb(WORK/'colours-cli.glb', colours=[[1,0,0,1],[0,1,0,0.5],[0,0,1,0]])
+        report = m.run(m.parser().parse_args([str(glb),'--out',str(WORK/'colours-cli'),'--size','8','--vertex-colours']))
+        self.assertEqual(report['saved_bounds']['min'],report['saved_core_bounds']['min'])
+        self.assertEqual(report['saved_bounds']['max'],report['saved_core_bounds']['max'])
+        stored,_ = m.parse_model((WORK/'colours-cli'/'Model'/'colours-cli.efkmodel').read_bytes(), True)
+        self.assertEqual([r[14:] for r in stored], [[1,0,0,1],[0,1,0,128/255],[0,0,1,0]])
+
     def test_glb_read(self):
         p = self.triangle()
         self.assertEqual(p['faces'],[[0,1,2]])

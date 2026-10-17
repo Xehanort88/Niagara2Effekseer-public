@@ -40,10 +40,10 @@ namespace Niagara2Efk
 				if (inner.Message.StartsWith("Version Error"))
 				{
 #if EFK18
-					Console.Error.WriteLine("Niagara2Efk: an effect it loaded was saved by an Effekseer newer than 1.80.3, which this build reads.");
+					Console.Error.WriteLine("Niagara2Efk: an effect it loaded was saved by an Effekseer newer than " + EfkCompat.CoreVersion + ", which this build reads.");
 #else
 					Console.Error.WriteLine("Niagara2Efk: an effect it loaded was saved by an Effekseer newer than 1.70 (a 1.8x editor or tool save).");
-					Console.Error.WriteLine("  Use the 1.80.3 build: dotnet src/Niagara2Efk1803/bin/Release/net9.0/Niagara2Efk.dll " + string.Join(" ", args));
+					Console.Error.WriteLine("  Use the 1.8 build: dotnet src/Niagara2Efk1803/bin/Release/net9.0/Niagara2Efk.dll " + string.Join(" ", args));
 #endif
 					Console.Error.WriteLine("  Command: " + string.Join(" ", args));
 					return 3;
@@ -73,7 +73,7 @@ namespace Niagara2Efk
 				Console.Error.WriteLine("       Niagara2Efk assemble  <spec.json> <out.efkefc>");
 				Console.Error.WriteLine("       Niagara2Efk parts     <selection.json> <outDir>");
 				Console.Error.WriteLine("       Niagara2Efk selftest  <catalogue.json> [workDir]");
-				Console.Error.WriteLine("       Niagara2Efk lint      <effect.efkefc | folder> [--catalogue out/catalogue.json] [--json report.json] [--strict]");
+				Console.Error.WriteLine("       Niagara2Efk lint      <effect.efkefc | folder> [--catalogue out/catalogue.json] [--json report.json] [--strict] [--runtime 1.80.3|1.80.7]");
 				Console.Error.WriteLine("       Niagara2Efk cascade   <dump.json> <out-intermediate.json> [worldScale] [spriteScale]");
 				return 2;
 			}

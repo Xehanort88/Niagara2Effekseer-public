@@ -88,6 +88,10 @@
     const anim = $dataAnimations[id];
     const url = EffectManager.makeUrl(anim.effectName);
     const cached = !!EffectManager._cache[url];
+    // Fully loaded before the request (preloaded): the cast a player sees when
+    // plugins/ReactorEffectPreload.js covers it. cachedBefore alone is also true
+    // for a load still in progress.
+    const loaded = cached && !!EffectManager._cache[url].isLoaded;
     const ss = SceneManager._scene._spriteset;
     const frames = []; let started = null, ended = null;
     const tReq = performance.now();
@@ -112,7 +116,7 @@
     const dts = srt(play.map((f) => f.dt)), rs = srt(play.map((f) => f.rend));
     const q = (a, p, d = 1) => (a.length ? +a[Math.min(a.length - 1, Math.floor(p * a.length))].toFixed(d) : null);
     return {
-      id, name: anim.name, effectName: anim.effectName, cachedBefore: cached,
+      id, name: anim.name, effectName: anim.effectName, cachedBefore: cached, loadedBefore: loaded,
       loadMs: L.t1 && !cached ? Math.round(L.t1 - L.t0) : null, loadErr: !!L.err,
       // Requested but neither loaded nor failed: the runtime gave no answer (a
       // corrupt .efkefc does this), so the game waits for it forever.
@@ -186,6 +190,12 @@
     if (!anim || !anim.effectName) throw new Error(`animation ${ID} has no Effekseer effect`);
     const glr = (() => { const g = Graphics._effekseerGL; const d = g.getExtension('WEBGL_debug_renderer_info'); return d ? g.getParameter(d.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER); })();
     DataManager.setupNewGame();
+    // run.js --preload-id: the tested id joins the preload plugin's list, as
+    // --prepare "ReactorEffectPreload.params.extraIds.push(ID);" would.
+    if (job.preloadId) {
+      if (!window.ReactorEffectPreload || !ReactorEffectPreload.params) throw new Error('--preload-id: the project does not run plugins/ReactorEffectPreload.js (window.ReactorEffectPreload missing)');
+      if (!ReactorEffectPreload.params.extraIds.includes(ID)) ReactorEffectPreload.params.extraIds.push(ID);
+    }
     if (job.prepare) (0, eval)(job.prepare);
     BattleManager.setup(job.troop || 1, true, false);
     const tGoto = performance.now();
@@ -204,7 +214,7 @@
       warmup = await probe(warmupId, { maxFrames: 3000 }); await sleep(500);
     }
     const backdrop = await grabSceneMean();
-    const common = { id: ID, renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
+    const common = { id: ID, preloadId: !!job.preloadId, renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
     if (job.mode === 'capture') {
       const url = EffectManager.makeUrl(anim.effectName);
       EffectManager.load(anim.effectName);

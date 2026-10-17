@@ -401,12 +401,10 @@ namespace Niagara2Efk
 							k.GetType().GetMethod("SetLeftDirectly").Invoke(k, new object[] { lx, (float)old[3] });
 							k.GetType().GetMethod("SetRightDirectly").Invoke(k, new object[] { rx, (float)old[5] });
 						}
-						// The random start offset is in the same units as the keys: the
-						// runtime subtracts it from the age (FCurve::GetValue,
-						// `frame -= offset_`). On a Time curve it is frames and stretches
-						// with them; on a Percent curve (above) it stays.
-						foreach (string offset in new[] { "OffsetMin", "OffsetMax" })
-							Scale(curve.GetType().GetProperty(offset)?.GetValue(curve), path + "/" + offset, factor);
+						// OffsetMin/OffsetMax stay: the runtime adds a random pick from them
+						// to the curve's value (FCurve::GetOffset, e.g. Rotation.cpp
+						// `fcurve + offset`), not to the age. `frame -= offset_` uses the first
+						// key's frame, which moves with the keys.
 						if (!SampleExactly(node, nodePath, new EditOp(), path, applied)) throw new InvalidOperationException(path + ": cannot sample retimed curve");
 						Console.WriteLine("RETIME CURVE: node '{0}' ({1}) {2}: Timeline Time, {3} keys, frames {4} -> {5}, handle X x{6}, Sampling 1",
 							nodePath, node.Name.Value, path, keys.Count, string.Join(",", state.Select(k => k[0])), string.Join(",", frames), factor);
@@ -1214,6 +1212,22 @@ namespace Niagara2Efk
 		static bool TryResolve(object node, string key, out Leaf leaf, out string err)
 		{
 			leaf = null; err = null;
+			const string materialPrefix = "RendererCommonValues/MaterialFile/";
+			if (key.StartsWith(materialPrefix + "Uniforms/", StringComparison.Ordinal) ||
+				key.StartsWith(materialPrefix + "Textures/", StringComparison.Ordinal))
+			{
+				bool texture = key.StartsWith(materialPrefix + "Textures/", StringComparison.Ordinal);
+				string name = key.Substring(materialPrefix.Length + (texture ? "Textures/" : "Uniforms/").Length);
+				if (!(node is Node n) || n.RendererCommonValues.Material.Value != RendererCommonValues.MaterialType.File)
+				{ err = "named material values require Material File on a drawing node"; return false; }
+				var slots = n.RendererCommonValues.MaterialFile.GetValueStatus()
+					.Where(s => s.IsShown && s.Key.UniformName == name &&
+						(texture ? s.Value is Effekseer.Data.Value.PathForImage : !(s.Value is Effekseer.Data.Value.Path))).ToArray();
+				if (slots.Length != 1)
+				{ err = "unknown or ambiguous material " + (texture ? "texture" : "uniform") + " name: " + name; return false; }
+				leaf = new Leaf { Value = slots[0].Value };
+				return true;
+			}
 			key = EfkCompat.NormalizePath(key);   // 1.7 and 1.8 spellings of the moved CommonValues settings
 			var segs = key.Split(new[] { '/', '.' }, StringSplitOptions.RemoveEmptyEntries);
 			object cur = node;
@@ -1305,6 +1319,9 @@ namespace Niagara2Efk
 				case Effekseer.Data.Value.Vector3D v3:
 					s = "(" + F(v3.X.Value) + ", " + F(v3.Y.Value) + ", " + F(v3.Z.Value) + ")";
 					return true;
+				case Effekseer.Data.Value.Vector4D v4:
+					s = "(" + F(v4.X.Value) + ", " + F(v4.Y.Value) + ", " + F(v4.Z.Value) + ", " + F(v4.W.Value) + ")";
+					return true;
 				case Effekseer.Data.Value.Vector2D v2:
 					s = "(" + F(v2.X.Value) + ", " + F(v2.Y.Value) + ")";
 					return true;
@@ -1388,6 +1405,9 @@ namespace Niagara2Efk
 		{
 			err = null;
 			float[] arr = j.ValueKind == JsonValueKind.Array ? j.EnumerateArray().Select(e => e.GetSingle()).ToArray() : null;
+			if ((arr != null && arr.Any(x => !float.IsFinite(x))) ||
+				(j.ValueKind == JsonValueKind.Number && !float.IsFinite(j.GetSingle())))
+			{ err = "expected finite floats"; return false; }
 			bool num = j.ValueKind == JsonValueKind.Number;
 			bool whole = TryInt(j, out int iv);
 			if (num && !whole && (v is Effekseer.Data.Value.Int || v is Effekseer.Data.Value.IntWithInifinite ||
@@ -1434,6 +1454,8 @@ namespace Niagara2Efk
 					str.SetValue(j.GetString()); return true;
 				case Effekseer.Data.Value.Vector2D v2 when arr != null && arr.Length == 2:
 					v2.X.SetValue(arr[0]); v2.Y.SetValue(arr[1]); return true;
+				case Effekseer.Data.Value.Vector4D v4 when arr != null && arr.Length == 4:
+					v4.X.SetValue(arr[0]); v4.Y.SetValue(arr[1]); v4.Z.SetValue(arr[2]); v4.W.SetValue(arr[3]); return true;
 				case Effekseer.Data.Value.Vector3D v3 when arr != null && arr.Length == 3:
 					v3.X.SetValue(arr[0]); v3.Y.SetValue(arr[1]); v3.Z.SetValue(arr[2]); return true;
 				// The alpha argument must always be passed: Effekseer's own
@@ -1795,6 +1817,7 @@ namespace Niagara2Efk
 				case Effekseer.Data.Value.FloatWithRandom fr: return new[] { fr.GetMin(), fr.GetMax() };
 				case Effekseer.Data.Value.IntWithRandom ir: return new[] { (float)ir.GetMin(), ir.GetMax() };
 				case Effekseer.Data.Value.Vector3D v: return new[] { v.X.Value, v.Y.Value, v.Z.Value };
+				case Effekseer.Data.Value.Vector4D v4: return new[] { v4.X.Value, v4.Y.Value, v4.Z.Value, v4.W.Value };
 				case Effekseer.Data.Value.Vector2D v2: return new[] { v2.X.Value, v2.Y.Value };
 				case Effekseer.Data.Value.Color c: return new float[] { c.R.Value, c.G.Value, c.B.Value, c.A.Value };
 				case Effekseer.Data.Value.ColorWithRandom cr:

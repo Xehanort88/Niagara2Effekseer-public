@@ -5,9 +5,9 @@ using Effekseer.Data;
 namespace Niagara2Efk
 {
 	/// <summary>
-	/// The few places where EffekseerCore 170e and 1.80.3 disagree, so the same
+	/// The few places where EffekseerCore 170e and 1.8 disagree, so the same
 	/// source builds against both (src/Niagara2Efk for 170e, src/Niagara2Efk1803
-	/// with EFK18 for 1.80.3).
+	/// with EFK18 for 1.8: upstream tag 1807, Effekseer 1.80.7, despite the folder name).
 	///
 	/// 1.8 moved six CommonValues settings into the new Generation and Removal
 	/// groups and kept the flat 1.7 properties as [IO(Import = true, Export =
@@ -18,15 +18,17 @@ namespace Niagara2Efk
 	/// </summary>
 	static class EfkCompat
 	{
+		// The core's own version ("1.70e", "1.80.7"): also the ToolVersion it stamps on save
+		// and the newest ToolVersion it loads.
+		public const string CoreVersion = Effekseer.Core.Version;
+
 #if EFK18
-		public const string CoreVersion = "1.80.3";
 		public static Effekseer.Data.Value.FloatWithRandom GenerationTime(CommonValues cv) { return cv.Generation.GenerationTime; }
 		public static Effekseer.Data.Value.FloatWithRandom GenerationTimeOffset(CommonValues cv) { return cv.Generation.GenerationTimeOffset; }
 		public static Effekseer.Data.Value.Boolean RemoveWhenLifeIsExtinct(CommonValues cv) { return cv.Removal.WhenLifeIsExtinct; }
 		public static Effekseer.Data.Value.Boolean RemoveWhenParentIsRemoved(CommonValues cv) { return cv.Removal.WhenParentIsRemoved; }
 		public static Effekseer.Data.Value.Boolean RemoveWhenAllChildrenAreRemoved(CommonValues cv) { return cv.Removal.WhenAllChildrenAreRemoved; }
 #else
-		public const string CoreVersion = "1.70e";
 		public static Effekseer.Data.Value.FloatWithRandom GenerationTime(CommonValues cv) { return cv.GenerationTime; }
 		public static Effekseer.Data.Value.FloatWithRandom GenerationTimeOffset(CommonValues cv) { return cv.GenerationTimeOffset; }
 		public static Effekseer.Data.Value.Boolean RemoveWhenLifeIsExtinct(CommonValues cv) { return cv.RemoveWhenLifeIsExtinct; }
