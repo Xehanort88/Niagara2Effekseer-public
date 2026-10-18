@@ -24,6 +24,7 @@ of the repository.
 | `tools/hlslcheck/` | Checks that `.efkmat` file materials compile as DirectX HLSL, as the Effekseer editor builds them (Windows, with tests). |
 | `tools/assetinspect/` | Read-only inspection of source assets: binary FBX inventory, texture contact sheets, OBJ wireframes (with tests). |
 | `tools/ingame/` | Plays animations in a real game project's battle scene on the real GPU: first-cast freeze, frame times, end, per-frame captures. |
+| `tools/effectjob/` | Per-effect manifest, preflight, runner and emitter ledger for multi-system Cascade/Niagara rebuilds (README § Effect manifest and ledger, with tests). |
 | `plugins/` | RPGReactor plugins (mods) for game projects, e.g. `ReactorEffectPreload.js`. |
 | `docs/TRAIL-CHECKLIST.md` | Checklist and diagnosis order for trail effects that look doubled, sharp or too short. |
 | `efkefc_dump.py` | `.efkefc` → readable XML decoder (independent of the C# path). |
@@ -357,8 +358,9 @@ No game runs in those. `--project "../ASSEMBLER TEST PROJECT"` adds live cases
 in that game, read-only, on stock animation 3: a clean run, then each failure
 forced for real (a corrupt effect file through `--sub`, an engine exception and
 a page error through `--prepare`, an animation cut off by `--max-frames` and
-`--capture-seconds`), and a capture rerun over stale frames compared with a
-noise floor. They take about five minutes and need the real GPU.
+`--capture-seconds`), `--max-frames` still counting game frames when the game is
+slowed to one update per two browser frames, and a capture rerun over stale
+frames compared with a noise floor. They take about five minutes and need the real GPU.
 
 Read a cooked Unreal **Cascade** dump and write the intermediate document. This
 is a front end only: it never touches Effekseer, and the mapper turns the
@@ -878,7 +880,12 @@ silently plays something else:
 A spec's top-level `"endFrame": N` sets the Effekseer editor's preview range end
 (`Core.EndFrame`, saved in the EDIT chunk only; the runtime ignores it). Pack
 effects save it at their own length (Lightforge: 120, looping), so the editor
-preview of a LENGTHENED effect stops or loops early unless this is raised. A copy placed under the same controller follows the
+preview of a LENGTHENED effect stops or loops early unless this is raised. The
+RPGReactor editor's animation preview also plays to it, so a too-large value (the
+`720` many of our specs carry) shows empty frames after the effect: set it to the
+effect's real end (§ Installing an effect into a game project). Changing it
+leaves BIN_ byte-identical; `dump` does not print it (read it back from EDIT, e.g.
+with `out/edits/ts-geodesic-vat-20261018/scratch/strip_hidden.py`'s `decode`). A copy placed under the same controller follows the
 same particle, which is how to layer a glow, a core and filaments on one
 projectile. Worked example: `out/edits/radiant_trails.py`, which writes the
 `RadiantShower-trails-*` specs.
@@ -1488,6 +1495,52 @@ trail's life. The checklist marks which points were measured on one Effekseer
 Track effect. The (1−V, U) streak mapping and its frame counts are examples
 from that effect, not rules.
 
+### Many particles from one node: track textures (vertex animation)
+
+An option when an effect draws hundreds of particles as one node per particle (source tracks from a game
+simulation, e.g. Geodesic Shield's 968 dust nodes): put every particle's per-frame values in a small data texture
+and draw them all with **one model node** whose material places each quad in its vertex stage. Geodesic Shield
+animation 639 (`out/edits/ts-geodesic-vat-20261018`, REPORT.md; scripts `scratch/make_vat3.py`,
+`scratch/strip_hidden.py`) draws all its dust this way against 631 at the noise floor (whole effect 0.016-0.033 %
+mean difference; dust alone 0.011 / 0.038 % against noise 0.009 / 0.024 %), with the file 8.9 -> 0.8 MB, keyed
+curves 16,153 -> 147 and warm draw p95 1.8 -> 0.2 ms; the first uncovered cast was ~125 ms slower (new textures and
+shaders; 6-9 ms with the preload plugin). Reach for it when per-particle nodes press on the 1024 rendering-node cap
+(§ The runtime's 1024 caps), the 32767-value editor limit below, file size or draw time; for a few dozen particles
+plain nodes are simpler.
+
+How it is built:
+- **Data texture**, RGB only (browsers decode PNGs premultiplied, so alpha cannot carry data): one column per frame
+  of the system's clock, a few rows per particle (position 16-bit per axis, size, halo size, roll, alpha, colour),
+  sampled from the per-particle curves the nodes had. Row 0 is a marker (magenta at the top, green at the bottom)
+  that the shader reads to know which way V runs, so the texture needs no mirrored copy.
+- **Model**: one quad per particle, all vertices at the local origin, the particle index in the vertex colour, the
+  corner in uv1, tangent / binormal / normal = local X / Y / Z. The material rebuilds the node's axes and scale from
+  `worldTangent` / `worldBinormal` / `worldNormal` x `objectScale`, so no matrix is needed.
+- **Material**: the particle's original material (here the ported game material with its bloom halo), plus a vertex
+  stage that reads the particle's row at frame `round($LOCALTIME$ x 60) - 1` and writes `worldPositionOffset`.
+  `$LOCALTIME$` is the effect's clock / 60 (`Effekseer.EffectNodeModel.cpp`), not the particle's age, and it runs
+  one frame ahead of the sprites' age (measured: -1 frame 0.030 %, 0 frames 0.157 %).
+- **Billboards as this game draws them**: Effekseer's sprites here stand upright (vertical = world up) and face one
+  horizontal direction; quads tilted toward the camera came out 1.156 x as tall. The corner is
+  `R (x s.x) + U (y s.y)` with `s` the instance's per-axis scale; RotatedBillboard rolls R / U by the angle Effekseer
+  takes from the instance's world Y axis (`CalcBillboard`: `s_z = Y.x / |Y.xy|`, `c_z = Y.y / |Y.xy|`).
+- **Random stream**: removing the particle nodes changes the randoms of other nodes born in the same frames (the
+  start swirl at f48-84 turned to another angle), even when the per-frame instance totals stay the same; merging a
+  frame's births into one multi-instance node did it too (cause in the runtime not found). Keep one colour-0,
+  one-frame placeholder node per original instance (same birth frame and tree position, Fixed transforms, no
+  curves) and turn the first one born into the model node. The node count stays; the per-frame data goes.
+- **Editor data**: `scratch/strip_hidden.py` decodes the EDIT chunk (EfkEfc.cs format), drops hidden nodes and the
+  placeholders' unused curve subtrees, and re-encodes it; re-save the result with `edit` and check that its BIN_ chunk
+  is byte-identical to the unstripped build (it was: the game gets exactly what was measured). `edit` itself has no
+  delete op.
+- The EDIT chunk numbers distinct value strings with **Int16** (`EfkEfc.cs`): above 32767 the file no longer loads in
+  the editor or our tools (`KeyNotFoundException` in `edit`'s read-back). Round per-frame values you add (1e-4
+  fractions, 0.1 px) and count them with `out/edits/ts-geodesic-halo-20261018/scratch/edit_value_count.py`.
+- **Check the WebGL compile, not only hlslcheck**: GLSL ES refuses `float + int`, so a literal like `42` instead of
+  `42.0` makes the game drop the material (nothing drawn, no error) while the editor's HLSL and `hlslcheck` accept
+  it. `out/edits/ts-geodesic-vat-20261018/scratch/gltest/index.html` plays an effect with the project's runtime and
+  logs every shader compile or link failure (serve `out/edits`, open it with `?f=<efkefc>&frame=<n>`).
+
 ## Checking curve timing
 
 `lint` reads one effect or recursively checks a folder without saving effects:
@@ -1532,7 +1585,8 @@ Changing either reader DLL invalidates the cache. Each effect loads in a fresh
 worker process; an unreadable file is retried with the other build when that
 DLL is available in the regular or `--artifacts-path` build layout. Build both
 versions first to enable that fallback. Unreadable files are listed, not fatal.
-Exit 0 means no `ours` findings, 1 means findings, and 2 means a usage error.
+Exit 0 means no `ours` findings, 1 means findings (or a count over the runtime's
+cap, below), and 2 means a usage error.
 
 Exit 0 therefore says nothing about effects that could not be read. When any
 target effect is unreadable, or a folder holds no `.efkefc` at all, lint ends
@@ -1543,6 +1597,28 @@ findings), for callers that need every target read, such as a check before
 installing. Unreadable *corpus* files are only counted: they can at most turn a
 `pack` curve into `ours`, never hide a finding, and one corpus (heavencloud) is
 known to be unloadable, so they do not trigger `--strict`.
+
+### The runtime's 1024 caps
+
+`lint` also checks the counts the runtime reads with a cap. `EffectImplemented::LoadBody`
+(`Effekseer.Effect.cpp`, 1.70e and 1.80.7 alike) reads the number of rendering nodes, images, normal
+images, distortion images, sounds, models, materials, curves, procedural models, dynamic inputs and
+dynamic equations, and each resource path's length, with `elementCountMax` = 1024. One value above
+1024 and `LoadEffect` returns nothing: the browser runtime calls neither onload nor onerror, so the
+game never plays the effect and shows no error (`tools/ingame` reports "effect never finished
+loading"). The editor core has no cap, so `edit` VERIFY passes. Rendering nodes are the one you
+will hit: `Exporter.cs` writes every node whose subtree draws something (the node or a descendant
+is rendered, plays a sound or has GPU particles), so a node that draws nothing still counts when a
+child draws. A Geodesic Shield build with 150 dust tracks had 1047 and never loaded; the shipped
+build keeps 1023.
+
+Each effect line gives `N rendering nodes (runtime cap 1024)`; a count over the cap adds a
+`LIMIT <name> <count> > 1024` line under it and `LINT LIMIT:` at the end, and lint exits 1 with
+or without `--strict`. The JSON report has every count in `Effects[].Elements` and the total in
+`LimitFindings`. If the counts could not all be taken (`LIMITS UNCHECKED:`), the check is
+incomplete and `--strict` exits 3. `edit` takes the same counts after VERIFY and prints
+`WARNING: rendering nodes 1025 > 1024: the runtime will not load this effect`; it still writes
+the file and exits 0, so a spec that adds nodes can be checked before trimming.
 
 ## Letter sheets from a font
 
@@ -1677,13 +1753,22 @@ Every results line has a `status` (`ok`, `warn` or `fail`) with its `failures`
 and `warnings` (rules in `tools/ingame/verdict.js`). A job fails when it times
 out, the page or engine throws, an effect fails to load or never finishes
 loading, or the animation never starts or does not end. "Does not end" means
-still playing `--max-frames` frames after its first frame (time mode, default
+still playing `--max-frames` game frames after its first frame (time mode, default
 3000) or `--capture-seconds` after capture began (default 120). Raise them for
 a genuinely long animation; a jobs file sets `maxFrames`/`captureSeconds` per
 job, and the default `--timeout` grows to fit. Loading has its own allowance:
-not started 3000 frames after the request is "never started". A corrupt
-`.efkefc` makes the runtime answer neither load nor error, so the game waits
-forever; that is reported as "never finished loading". Console errors and the
+not started 3000 game frames after the request is "never started". Both limits
+count game frames (`Graphics.frameCount`, 60 per second, the unit of the results
+line's `N frames` and `gameFrames`), not browser frames: on a 144-165 Hz display
+the browser draws 2-3 frames per game frame, and before 2026-10-17 the limits
+counted browser frames, so `--max-frames 900` cut off a 331-game-frame effect.
+Each play also reports `browserFrames`; `frameMs` and `framesOver20ms` are per
+browser frame, so compare them only between runs on the same display. A play
+whose game frame stands still for 600 browser frames (an engine exception stops
+the game loop) ends there and fails as "the game stopped updating". A corrupt
+`.efkefc`, or one over the runtime's 1024 caps (more than 1024 rendering nodes;
+`lint` reports it, § The runtime's 1024 caps), makes the runtime answer neither load
+nor error, so the game waits forever; that is reported as "never finished loading". Console errors and the
 preload plugin timing out are warnings. All jobs run even after one fails; the
 last line is `INGAME: N job(s), ... failed`. `run.js` exits 0 when no job
 failed (warnings included), 1 when any job failed, and 2 for a usage error
@@ -1759,6 +1844,17 @@ changed it meanwhile, and with `--ingame` plays it twice in a real battle with
 `js/plugins/ReactorEffectPreload.js`, once more with `--preload-id`, printing both freezes. A regenerated texture that clashes with a stale same-named
 copy in the project fails the read-back with an explanation. `--tool` picks the
 `Niagara2Efk.dll`. Its test: `python tools/install/test_install.py --work out/tests/install`.
+
+**No empty frames: an effect ends right after its last drawn frame.** An installed effect should not draw nothing
+for a stretch at its end (or begin with frames where nothing is drawn), and its `endFrame` should be that end, not a
+round number: RPGReactor waits for the effect to finish before the battle moves on, and the RPGReactor editor's
+preview plays to `endFrame`. What keeps an effect alive after its last visible frame is usually undrawn holder nodes
+with a fixed life (system roots, Turn, car/aim/tilt chains: give them `CommonValues/RemoveWhenAllChildrenAreRemoved`)
+or a long-lived node whose last cells are empty (cut its life). Geodesic Shield's round 3 cut 512 frames to 305 this
+way (`out/edits/ts-geodesic-sourcedust-20261017`, REPORT.md § Round 3). Find the last drawn frame in a step-1 capture
+(the last frame that still differs from the frame after the effect, battle view only), then set the spec's `endFrame` to
+the frame count the `--ingame` runs print for the animation (`305 frames, ended` for Geodesic Shield 639; RPGReactor
+counts a few frames past the last drawn pixel, f288 there) and reinstall with `--replace --id N`.
 
 Before building, it checks that every file the spec names is on disk (its `source` effect, `add.file` sources, and
 the textures, models and materials in its values) and refuses with the list (exit 2) when one is missing. The edit

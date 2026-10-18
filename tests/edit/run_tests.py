@@ -162,6 +162,7 @@ class Suite:
         path.write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
         output = output or self.directory / f"edited-{self.counter:03}.efkefc"
         result = self.tool("edit", path, output, code=code)
+        self.edit_stdout = result.stdout
         if code == 0:
             contains(result.stdout, "VERIFY OK")
             require(not result.stderr.strip(), f"unexpected stderr: {result.stderr}")
@@ -661,6 +662,29 @@ class Suite:
         result = self.tool("lint", self.base, "--strict", "--catalogue", catalogue)
         contains(result.stdout, "LINT NOTE: comparison corpus incomplete (1 of 2 files unreadable)")
 
+    def element_limit(self, over):
+        """The runtime reads the rendering-node count with a cap of 1024 (Effekseer.Effect.cpp
+        elementCountMax) and loads nothing above it. 1025 nodes either way: over, one node draws
+        nothing but its child does (it still counts, Exporter.cs IsRenderedNodeGroup); at the cap,
+        one leaf draws nothing and drops out, leaving exactly 1024."""
+        edits = [{"node": "root", "add": {"from": "0"}} for _ in range(1022)]
+        edits.append({"node": "root", "add": {"from": "0", "name": "Blank"}, "set": {"DrawingValues/Type": "None"}})
+        edits.append({"node": "1023", "add": {"from": "0", "name": "Child"}} if over else {"node": "root", "add": {"from": "0"}})
+        out = self.edit({"source": str(self.base), "edits": edits})
+        warning = "WARNING: rendering nodes 1025 > 1024"
+        contains(self.edit_stdout, "VERIFY OK: 1025 nodes")
+        require((warning in self.edit_stdout) == over, f"edit warning {'missing' if over else 'unexpected'}")
+        report = out.with_suffix(".limit.json")
+        result = self.tool("lint", out, "--strict", "--json", report, code=1 if over else 0)
+        contains(result.stdout, f"{1025 if over else 1024} rendering nodes (runtime cap 1024)")
+        require(("LIMIT rendering nodes 1025 > 1024" in result.stdout) == over, "LIMIT line")
+        require(("LINT LIMIT: 1 count(s)" in result.stdout) == over, "LINT LIMIT summary")
+        data = json.loads(report.read_text(encoding="utf-8"))
+        nodes = [c for c in data["Effects"][0]["Elements"] if c["Name"] == "rendering nodes"]
+        require(nodes and nodes[0]["Value"] == (1025 if over else 1024), f"rendering nodes {nodes}")
+        require((data["LimitFindings"], data["Complete"]) == (1 if over else 0, True),
+                f"LimitFindings/Complete {data['LimitFindings']}/{data['Complete']}")
+
     def unchanged(self):
         for source, data in self.sources.items():
             require(source.read_bytes() == data, f"fixture source modified: {source}")
@@ -737,6 +761,8 @@ class Suite:
         yield "lint_empty_folder_strict_exit_3", lambda: self.lint_empty(True, 3)
         yield "lint_strict_complete_exit_0", self.lint_strict_complete
         yield "lint_incomplete_corpus_noted", self.lint_incomplete_corpus
+        yield "element_limit_1025_rendering_nodes_refused", lambda: self.element_limit(True)
+        yield "element_limit_1024_rendering_nodes_pass", lambda: self.element_limit(False)
         yield "source_fixtures_unchanged", self.unchanged
         yield "material_uniforms_float1_to_float4_textures_and_copy", self.material_values
         for bad in ('name', 'width', 'kind', 'missing_texture', 'nonfinite', 'not_file'):

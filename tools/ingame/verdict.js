@@ -20,9 +20,10 @@ function verdict(r) {
     const p = r[k];
     if (!p) continue;
     if (p.loadErr) failures.push(`${k} play: effect failed to load`);
-    if (p.loadPending) failures.push(`${k} play: effect never finished loading (the runtime reported neither load nor error; corrupt file?)`);
-    if (p.requestToStartMs === null || p.requestToStartMs === undefined) failures.push(`${k} play: animation never started within 3000 frames of the request`);
-    else if (!p.ended) failures.push(`${k} play: animation did not end within ${p.frameLimit || 3000} frames (--max-frames)`);
+    if (p.loadPending) failures.push(`${k} play: effect never finished loading (the runtime reported neither load nor error: the runtime refuses an effect with more than 1024 rendering nodes, images, models or curves this way, run lint --strict on it; else a corrupt file)`);
+    if (p.stalled) failures.push(`${k} play: the game stopped updating (no new game frame for 600 browser frames)`);
+    else if (p.requestToStartMs === null || p.requestToStartMs === undefined) failures.push(`${k} play: animation never started within 3000 game frames of the request`);
+    else if (!p.ended) failures.push(`${k} play: animation did not end within ${p.frameLimit || 3000} game frames (--max-frames)`);
   }
   if (r.cold && !r.warm && measured) failures.push('time mode result has no warm play');
   // --preload-id asked for the covered cast; a cold play that still loaded the

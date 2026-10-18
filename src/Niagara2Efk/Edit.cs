@@ -1151,6 +1151,14 @@ namespace Niagara2Efk
 									keySets.Count > 0 ? ", " + keySets.Count + " curve(s) rewritten" : "",
 									modelXml.Count > 0 ? string.Format(", {0} procedural model(s) ({1} added) and {2} project reference(s) identical after saving", modelXml.Count, modelXml.Count - modelsAtLoad, referenced.Count) : "")
 								 : "VERIFY FAILED");
+			// The editor core reloads any count; the runtime refuses an effect with more than 1024
+			// rendering nodes, images, models... (ElementLimits) without an error. The file is still
+			// written (a step towards a smaller effect may need it), but lint --strict fails it.
+			var limits = ElementLimits.Measure();
+			foreach (string problem in ElementLimits.Problems(limits.Counts))
+				Console.WriteLine("WARNING: {0}: the runtime will not load this effect (Effekseer.Effect.cpp elementCountMax {1}; the game shows no error)", problem, ElementLimits.Max);
+			if (limits.Error != null)
+				Console.WriteLine("WARNING: the runtime's 1024 caps were not all checked: " + limits.Error);
 			return ok ? 0 : 1;
 		}
 

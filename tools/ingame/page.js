@@ -17,8 +17,14 @@
   // How long an animation may play, from its first frame, before it counts as
   // not ending (run.js --max-frames / --capture-seconds). Loading has its own
   // allowance: an animation not started this many frames after the request
-  // never started.
-  const MAX_FRAMES = job.maxFrames || 3000, CAPTURE_S = job.captureSeconds || 120, LOAD_FRAMES = 3000;
+  // never started. Both count game frames (Graphics.frameCount, 60 per second),
+  // not browser frames: on a 144-165 Hz display requestAnimationFrame ticks two
+  // to three times per game frame, and a browser-frame limit cut effects off
+  // at a third of their length. A game that stops updating (an engine
+  // exception calls SceneManager.stop) would never reach either limit, so a
+  // play also ends when the game frame stands still for STALL_FRAMES browser
+  // frames (10 s at 60 Hz, 3.6 s at 165 Hz; a load freeze is one long frame).
+  const MAX_FRAMES = job.maxFrames || 3000, CAPTURE_S = job.captureSeconds || 120, LOAD_FRAMES = 3000, STALL_FRAMES = 600;
   const P = { loads: {}, renderMs: 0, updMs: 0, finish: false, peakLive: 0, longTasks: [], engineErrors: [] };
   // Console warnings and errors (first 40 distinct, with repeat counts).
   const consoleLog = {};
@@ -93,10 +99,13 @@
     // for a load still in progress.
     const loaded = cached && !!EffectManager._cache[url].isLoaded;
     const ss = SceneManager._scene._spriteset;
-    const frames = []; let started = null, ended = null;
+    const frames = []; let started = null, ended = null, stalled = false;
     const tReq = performance.now();
     $gameTemp.requestAnimation($gameTroop.aliveMembers(), id);
+    // n counts browser frames (frame-time statistics); the limits use gf, the
+    // game frames since the request.
     let last = performance.now(), n = 0;
+    const gf0 = Graphics.frameCount; let lastGf = gf0, lastGfN = 0;
     await new Promise((res) => {
       function tick(now) {
         const dt = now - last; last = now; n++;
@@ -104,7 +113,9 @@
         frames.push({ dt, upd: P.updMs, rend: P.renderMs }); P.updMs = 0; P.renderMs = 0;
         if (started === null && sp && sp._started) started = { n, gf: Graphics.frameCount, ms: now - tReq };
         if (started !== null && !ss.isAnimationPlaying()) { ended = { n, gf: Graphics.frameCount }; return res(); }
-        if (started === null ? n > LOAD_FRAMES : n - started.n > maxFrames) return res();
+        const gf = Graphics.frameCount;
+        if (gf !== lastGf) { lastGf = gf; lastGfN = n; } else if (n - lastGfN > STALL_FRAMES) { stalled = true; return res(); }
+        if (started === null ? gf - gf0 > LOAD_FRAMES : gf - started.gf > maxFrames) return res();
         requestAnimationFrame(tick);
       }
       requestAnimationFrame(tick);
@@ -124,7 +135,10 @@
       requestToStartMs: started ? Math.round(started.ms) : null,
       worstFrameDuringLoadMs: pre.length ? Math.round(Math.max(...pre.map((f) => f.dt))) : null,
       longTasksMs: P.longTasks.slice(),
-      gameFrames: started && ended ? ended.gf - started.gf : null, ended: !!ended, frameLimit: maxFrames,
+      gameFrames: started && ended ? ended.gf - started.gf : null, ended: !!ended, frameLimit: maxFrames, frameLimitUnit: 'game', stalled,
+      // Browser frames over the play: about gameFrames on a 60 Hz display, more
+      // on a faster one. frameMs and framesOver20ms are per browser frame.
+      browserFrames: started ? (ended ? ended.n : n) - started.n : null,
       frameMs: { median: q(dts, 0.5), p95: q(dts, 0.95), max: q(dts, 1) },
       framesOver20ms: play.filter((f) => f.dt > 20).length,
       drawMs: { median: q(rs, 0.5, 2), p95: q(rs, 0.95, 2), max: q(rs, 1, 2), gpuSynced: finish },

@@ -32,8 +32,10 @@
 //                          effect was not loaded before the cold play.
 //   --port N               default 8901; pick one nobody else is using
 //   --chrome <path>        default C:/Program Files/Google/Chrome/Application/chrome.exe
-//   --max-frames N         time mode: frames an animation may play before it
-//                          counts as not ending, default 3000
+//   --max-frames N         time mode: game frames (Graphics.frameCount, 60 per
+//                          second) an animation may play before it counts as
+//                          not ending, default 3000. Not browser frames: on a
+//                          faster display those tick 2-3 times per game frame.
 //   --capture-seconds S    capture mode: the same limit in seconds, default 120
 //   --timeout S            per job; default fits the limits above: at least
 //                          240, 260 for a default time-mode job
@@ -96,8 +98,8 @@ else {
 }
 jobs.forEach((j, n) => { if (!j.tag) j.tag = `job${n}-${j.id}`; if (!j.mode) j.mode = 'time'; });
 // The job's own limit decides when it is cut off; the default leaves room for it.
-// Time mode: two plays, each up to 3000 frames of loading plus --max-frames of
-// play at 60 fps; capture: 60 s of loading plus --capture-seconds; plus start-up.
+// Time mode: two plays, each up to 3000 game frames of loading plus --max-frames
+// of play at 60 fps; capture: 60 s of loading plus --capture-seconds; plus start-up.
 const jobTimeout = (j) => j.timeout || Math.max(240, Math.ceil(j.mode === 'capture' ? (j.captureSeconds || 120) + 150 : 2 * (3000 + (j.maxFrames || 3000)) / 60 + 60));
 const FRAME_FILE = /^(f\d+\.rgba|shot-f\d+\.jpg)$/;
 fs.mkdirSync(OUT, { recursive: true });

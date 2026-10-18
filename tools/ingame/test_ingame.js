@@ -10,7 +10,8 @@
 // --project adds live cases in that game (read-only, stock animation 3): a clean
 // run, then each failure path forced inside the real game (broken effect file,
 // engine exception, page error, animation cut off by --max-frames and
-// --capture-seconds), a capture rerun over stale frames compared live, and
+// --capture-seconds), --max-frames counting game frames when browser frames
+// run faster, a capture rerun over stale frames compared live, and
 // --preload-id (the project must run plugins/ReactorEffectPreload.js).
 // Every file goes under --work, in a fresh run-* folder.
 const fs = require('fs'), path = require('path'), assert = require('assert');
@@ -50,17 +51,19 @@ test('verdict_never_ended_fails', () => { const r = okTime(); r.cold.ended = fal
 test('verdict_never_started_fails', () => { const r = okTime(); r.warm.requestToStartMs = null; r.warm.ended = false; assert.match(verdict(r).failures.join(), /warm play: animation never started/); });
 test('verdict_reports_job_limits', () => {
   const r = okTime(); r.cold.ended = false; r.cold.frameLimit = 20;
-  assert.match(verdict(r).failures.join(), /did not end within 20 frames \(--max-frames\)/);
+  assert.match(verdict(r).failures.join(), /did not end within 20 game frames \(--max-frames\)/);
   const c = okCap(); c.capture.ended = false; c.capture.captureSeconds = 7;
   assert.match(verdict(c).failures.join(), /did not end within 7 s/);
   assert.match(verdict({ timeout: true, timeoutSeconds: 300 }).failures.join(), /timed out after 300 s/);
 });
+test('verdict_stalled_game_fails', () => { const r = okTime(); r.cold.ended = false; r.cold.stalled = true; assert.deepStrictEqual(verdict(r).failures, ['cold play: the game stopped updating (no new game frame for 600 browser frames)']); });
 test('verdict_capture_not_ended_fails', () => { const r = okCap(); r.capture.ended = false; assert.strictEqual(verdict(r).status, 'fail'); });
 test('verdict_capture_never_started_fails', () => assert.strictEqual(verdict(okCap(-1)).status, 'fail'));
 test('verdict_empty_result_fails', () => assert.strictEqual(verdict({ tag: 'x' }).status, 'fail'));
 test('verdict_load_pending_fails', () => {
   const r = okTime(); r.cold.loadPending = true; r.cold.requestToStartMs = null; r.cold.ended = false;
   assert.match(verdict(r).failures.join(), /cold play: effect never finished loading/);
+  assert.match(verdict(r).failures.join(), /more than 1024 rendering nodes.*lint --strict/);
 });
 test('verdict_preload_timeout_warns', () => { const v = verdict({ ...okTime(), preload: { timedOut: true } }); assert.strictEqual(v.status, 'warn'); assert.deepStrictEqual(v.failures, []); });
 test('verdict_preload_id_needs_loaded_cold_play', () => {
@@ -266,7 +269,7 @@ if (!opts.noChrome) {
   test('run_canned_never_ended_exits_1', () => {
     const r = okTime(); r.cold.ended = false;
     const { lines } = runjs('never-ended', project('never', postResult(r)), ['--ids', '1', '--timeout', '60'], 1);
-    assert.match(lines[0].failures.join(), /cold play: animation did not end within 3000 frames/);
+    assert.match(lines[0].failures.join(), /cold play: animation did not end within 3000 game frames/);
   });
   // The page echoes the job it was given, so the flag's path from the CLI and a
   // jobs file to page.js is checked without a game.
@@ -330,6 +333,8 @@ if (opts.project && !opts.noChrome) {
       '--prepare', 'Sprite_Animation.prototype.update = function () { throw new Error("injected engine error"); };'], 1);
     assert.match(lines[0].failures.join(), /engine error/);
     assert.match(lines[0].engineErrors.join(), /injected engine error/);
+    // The exception stops the game loop: the game-frame limits cannot trip, the stall guard must.
+    assert.ok(lines[0].cold.stalled, JSON.stringify(lines[0].cold));
   });
   test('live_page_error_fails', () => {
     const { lines } = runjs('live-page', P, ['--ids', ID, '--prepare', 'throw new Error("injected prepare error");'], 1);
@@ -337,7 +342,20 @@ if (opts.project && !opts.noChrome) {
   });
   test('live_max_frames_cut_off_fails', () => {
     const { lines } = runjs('live-maxframes', P, ['--ids', ID, '--max-frames', '20'], 1);
-    assert.match(lines[0].failures.join(), /cold play: animation did not end within 20 frames/);
+    assert.match(lines[0].failures.join(), /cold play: animation did not end within 20 game frames/);
+  });
+  // --max-frames counts game frames, not browser frames. Dropping every other
+  // update gives two browser frames per game frame (as a 120 Hz display does);
+  // a limit just above the animation's length in game frames must still let it end.
+  test('live_max_frames_counts_game_frames', () => {
+    const base = runjs('live-gf-base', P, ['--ids', ID, '--warmup', '0'], 0).lines[0];
+    const len = base.cold.gameFrames;
+    assert.ok(len > 20, `stock animation ${ID} plays ${len} game frames`);
+    const halve = 'const o = SceneManager.determineRepeatNumber; let k = 0; SceneManager.determineRepeatNumber = function (d) { const r = o.call(this, d); return k++ % 2 ? 0 : r; };';
+    const { lines } = runjs('live-gf-slow', P, ['--ids', ID, '--warmup', '0', '--max-frames', String(len + 10), '--prepare', halve], 0);
+    const c = lines[0].cold;
+    assert.deepStrictEqual([lines[0].status, c.ended, c.frameLimitUnit], ['ok', true, 'game'], lines[0].failures.join());
+    assert.ok(c.browserFrames >= 1.8 * c.gameFrames, `${c.browserFrames} browser frames for ${c.gameFrames} game frames: the slowdown did not take`);
   });
   test('live_capture_cut_off_unusable', () => {
     const { lines } = runjs('live-capcut', P, ['--ids', ID, '--mode', 'capture', '--capture-seconds', '0.3'], 1);

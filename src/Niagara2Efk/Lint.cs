@@ -16,8 +16,9 @@ using Path = System.IO.Path;
 
 namespace Niagara2Efk
 {
-	/// <summary>Read-only curve checks. Each file is loaded in a fresh process:
-	/// Core.New does not clear every piece of Effekseer's static project state.</summary>
+	/// <summary>Read-only curve checks, plus the counts the runtime caps at 1024 (ElementLimits).
+	/// Each file is loaded in a fresh process: Core.New does not clear every piece of Effekseer's
+	/// static project state.</summary>
 	static class Lint
 	{
 		static readonly JsonSerializerOptions Json = new JsonSerializerOptions { WriteIndented = true };
@@ -76,6 +77,10 @@ namespace Niagara2Efk
 			public string Reader { get; set; }
 			public string Error { get; set; }
 			public List<Curve> Curves { get; set; } = new List<Curve>();
+			/// <summary>The counts the runtime reads with a cap of 1024 (analyse mode only).</summary>
+			public List<ElementLimits.Count> Elements { get; set; } = new List<ElementLimits.Count>();
+			/// <summary>Why some counts are missing (the exporter failed), else null.</summary>
+			public string ElementsError { get; set; }
 		}
 		public class CacheEntry
 		{
@@ -106,6 +111,11 @@ namespace Niagara2Efk
 			public int CorpusFiles { get; set; }
 			public int OursFindings { get; set; }
 			public int PackFindings { get; set; }
+			/// <summary>Counts over the runtime's cap of 1024, summed over the target effects: each one
+			/// stops the game from loading its effect at all.</summary>
+			public int LimitFindings { get; set; }
+			/// <summary>Target effects whose capped counts could not all be taken.</summary>
+			public int UncountedEffects { get; set; }
 			// Complete is false when any target effect could not be read (or none
 			// was found): the findings then cover only the readable ones.
 			public int TargetEffects { get; set; }
@@ -245,13 +255,22 @@ namespace Niagara2Efk
 				Effekseer.Utils.Logger.LogPath = log;
 				Core.New();
 				if (!Core.LoadFrom(result.File)) result.Error = "Core.LoadFrom rejected the file";
-				else Nodes(Core.Root, "", result.Curves, args[1] == "analyse", args[2]);
+				else
+				{
+					Nodes(Core.Root, "", result.Curves, args[1] == "analyse", args[2]);
+					if (args[1] == "analyse")
+					{
+						var limits = ElementLimits.Measure();
+						result.Elements = limits.Counts; result.ElementsError = limits.Error;
+					}
+				}
 			}
 			catch (Exception e)
 			{
 				while (e.InnerException != null) e = e.InnerException;
 				result.Error = e.GetType().Name + ": " + e.Message;
 				result.Curves.Clear();
+				result.Elements.Clear();
 			}
 			finally
 			{
@@ -424,7 +443,20 @@ namespace Niagara2Efk
 					var findings = effect.Curves.Where(HasFinding).ToList();
 					int ours = findings.Count(c => c.Origin == "ours"), packs = findings.Count - ours;
 					report.OursFindings += ours; report.PackFindings += packs;
-					Console.WriteLine("{0}: {1} keyed curves, {2} ours / {3} pack findings", file, effect.Curves.Count, ours, packs);
+					var nodes = effect.Elements.FirstOrDefault(c => c.Name == "rendering nodes");
+					Console.WriteLine("{0}: {1} keyed curves, {2} ours / {3} pack findings, {4} rendering nodes (runtime cap {5})", file, effect.Curves.Count, ours, packs,
+						nodes == null ? "?" : nodes.Value.ToString(CultureInfo.InvariantCulture), ElementLimits.Max);
+					// Over the cap the runtime's LoadEffect returns null: no load, no error, nothing plays.
+					foreach (string problem in ElementLimits.Problems(effect.Elements))
+					{
+						report.LimitFindings++;
+						Console.WriteLine("  LIMIT {0}: the runtime refuses to load this effect (Effekseer.Effect.cpp elementCountMax; the game shows no error)", problem);
+					}
+					if (effect.ElementsError != null || nodes == null)
+					{
+						report.UncountedEffects++;
+						Console.WriteLine("  LIMITS UNCHECKED: " + (effect.ElementsError ?? "no counts from the reader"));
+					}
 					foreach (var c in findings)
 					{
 						string delta = c.LargestDifference == null ? "" : "; max difference " + F(c.LargestDifference.AbsoluteDifference) +
@@ -437,9 +469,11 @@ namespace Niagara2Efk
 				}
 				report.TargetEffects = report.Effects.Count;
 				report.UnreadableEffects = report.Effects.Count(e => e.Error != null);
-				report.Complete = report.TargetEffects > 0 && report.UnreadableEffects == 0;
+				report.Complete = report.TargetEffects > 0 && report.UnreadableEffects == 0 && report.UncountedEffects == 0;
 				if (json != null) SaveJson(json, report);
 				Console.WriteLine("LINT: {0} effects, {1} ours / {2} pack findings, {3} unreadable effects (runtime {4})", report.Effects.Count, report.OursFindings, report.PackFindings, report.UnreadableEffects, runtime);
+				if (report.LimitFindings > 0)
+					Console.WriteLine("LINT LIMIT: {0} count(s) over the runtime's cap of {1} (LIMIT lines above): the game will not load those effects", report.LimitFindings, ElementLimits.Max);
 				// An unreadable comparison corpus (e.g. a sandbox that cannot see the corpus drive) was only on the
 				// Corpus line, far above. Fewer pack signatures can only move findings from pack to ours, so a
 				// clean result still stands and the exit status is unchanged; but say it at the end.
@@ -450,13 +484,16 @@ namespace Niagara2Efk
 				{
 					// Unreadable effects stay non-fatal by default (exit 0 means no ours
 					// findings among the effects that were read); say so plainly.
-					Console.WriteLine(report.TargetEffects == 0
-						? "LINT INCOMPLETE: no .efkefc effect found under " + target + "; nothing was checked"
-						: "LINT INCOMPLETE: " + report.UnreadableEffects + " of " + report.TargetEffects + " target effects unreadable (UNREADABLE lines above); findings cover only the other " + (report.TargetEffects - report.UnreadableEffects));
+					if (report.TargetEffects == 0)
+						Console.WriteLine("LINT INCOMPLETE: no .efkefc effect found under " + target + "; nothing was checked");
+					else if (report.UnreadableEffects > 0)
+						Console.WriteLine("LINT INCOMPLETE: " + report.UnreadableEffects + " of " + report.TargetEffects + " target effects unreadable (UNREADABLE lines above); findings cover only the other " + (report.TargetEffects - report.UnreadableEffects));
+					if (report.UncountedEffects > 0)
+						Console.WriteLine("LINT INCOMPLETE: the runtime's 1024 caps could not be checked on " + report.UncountedEffects + " of " + report.TargetEffects + " target effects (LIMITS UNCHECKED lines above)");
 					Console.WriteLine(strict ? "LINT: --strict, exit 3" : "LINT: an incomplete check does not change the exit status; use --strict to fail on it");
 					if (strict) return 3;
 				}
-				return report.OursFindings > 0 ? 1 : 0;
+				return report.OursFindings > 0 || report.LimitFindings > 0 ? 1 : 0;
 			}
 			catch (Exception e) when (e is IOException || e is UnauthorizedAccessException || e is JsonException || e is ArgumentException || e is InvalidOperationException || e is KeyNotFoundException)
 			{ return Usage(e.Message); }
@@ -466,7 +503,7 @@ namespace Niagara2Efk
 			Console.Error.WriteLine("lint: " + error);
 			Console.Error.WriteLine("usage: Niagara2Efk lint <effect.efkefc | folder> [--catalogue out/catalogue.json] [--json report.json] [--strict] [--runtime 1.80.3|1.80.7]");
 			Console.Error.WriteLine("runtime: how the target project's runtime plays a short last curve segment; default " + DefaultRuntime + " ; use 1.80.3 for a 1.80.3 or 1.70e runtime");
-			Console.Error.WriteLine("exit: 0 no ours findings, 1 ours findings, 2 usage error, 3 (--strict only) a target effect was unreadable or none was found");
+			Console.Error.WriteLine("exit: 0 no ours findings, 1 ours findings or a count over the runtime's cap of 1024 (rendering nodes, images, models...), 2 usage error, 3 (--strict only) a target effect was unreadable, its caps uncounted, or none was found");
 			return 2;
 		}
 	}
