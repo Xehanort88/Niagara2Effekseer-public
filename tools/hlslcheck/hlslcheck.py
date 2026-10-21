@@ -9,6 +9,10 @@ it with Windows' d3dcompiler_47.dll: the pixel shader (ps_4_0) and the sprite an
 since the editor builds the code into all of them and drops the material if any fails. The vertex shaders
 declare their own locals, so code that declares one of them fails there only: the model vertex shader's
 'float4 uv' (redefinition of 'uv') turned every OT0 port into a plain quad in the editor (2026-10-11).
+Every shader declares the background and depth textures (efk_background_texture/_sampler, efk_depth_texture/
+_sampler) after the material's own, as the generator does. A material flagged as refraction (PRM_ hasRefraction)
+is drawn twice, so its pixel shader is also compiled a second time with the generator's refraction ending (pass 0:
+cameraMat declared, the background read at the refracted screen position) besides the normal one (pass 1).
 Windows only; nothing to install.
 
 Usage: python tools/hlslcheck/hlslcheck.py <file.efkmat | folder> ...   (folders are searched recursively)
@@ -31,7 +35,8 @@ def parse_efkmat(data):
         raise ValueError('not an efkmat file')
     version = struct.unpack_from('<i', data, 4)[0]
     off = 16
-    info = {'version': version, 'cd1': 0, 'cd2': 0, 'textures': [], 'uniforms': [], 'required': [], 'code': None}
+    info = {'version': version, 'cd1': 0, 'cd2': 0, 'textures': [], 'uniforms': [], 'required': [], 'code': None,
+            'refraction': False}
     while off + 8 <= len(data):
         tag = data[off:off + 4]
         size = struct.unpack_from('<i', data, off + 4)[0]
@@ -47,7 +52,8 @@ def parse_efkmat(data):
                 s = data[p:p + n].split(b'\0', 1)[0].decode('utf-8', 'replace')
                 p += n
                 return s
-            _shading, _normal, _refraction, info['cd1'], info['cd2'] = struct.unpack_from('<5i', data, p)
+            _shading, _normal, refraction, info['cd1'], info['cd2'] = struct.unpack_from('<5i', data, p)
+            info['refraction'] = refraction != 0
             p += 20
             if version >= 1703:
                 n = i32()
@@ -81,8 +87,34 @@ def parse_efkmat(data):
     return info
 
 
-def to_hlsl(info):
-    """The material code inside a pixel shader declared like the HLSL generator's (sprite, unlit or lit)."""
+# The end of the pixel shader that draws a refraction material's pass 0, as Effekseer 1.80.7's HLSL generator
+# (DirectX 11) writes it: HLSLGenerator/ShaderGenerator.cpp GetMaterialPS_Suf2_Refraction.
+REFRACTION_SUFFIX = """
+  float airRefraction = 1.0;
+  float3 dir = mul((float3x3)cameraMat, pixelNormalDir);
+  dir.y = -dir.y;
+  float2 distortUV = dir.xy * (refraction - airRefraction);
+  distortUV += screenUV;
+  distortUV = GetUVBack(distortUV);
+  float4 bg = efk_background_texture.Sample(efk_background_sampler, distortUV);
+  float4 Output = bg;
+  if(opacityMask <= 0.0) discard;
+  if(opacity <= 0.0) discard;
+  return Output;"""
+
+
+def builtin_textures(slot):
+    """The background and depth textures every generated shader declares after the material's own textures
+    (ShaderGenerator::GenerateShader, 'background' / 'depth')."""
+    return ['Texture2D efk_background_texture : register(t%d);' % slot,
+            'SamplerState efk_background_sampler : register(s%d);' % slot,
+            'Texture2D efk_depth_texture : register(t%d);' % (slot + 1),
+            'SamplerState efk_depth_sampler : register(s%d);' % (slot + 1)]
+
+
+def to_hlsl(info, refraction=False):
+    """The material code inside a pixel shader declared like the HLSL generator's (sprite, unlit or lit). With
+    refraction, the pass-0 shader of a refraction material: cameraMat declared and the generator's refraction ending."""
     code = info['code']
     for a, b in (('$F1$', 'float'), ('$F2$', 'float2'), ('$F3$', 'float3'), ('$F4$', 'float4'),
                  ('$TIME$', 'predefined_uniform.x'), ('$LOCALTIME$', 'predefined_uniform.w'), ('$UV$', 'uv'),
@@ -95,8 +127,11 @@ def to_hlsl(info):
         code = code.replace('$TEX_P%d$' % t['index'], '%s_texture.Sample(%s_sampler,GetUV(' % (name, name))
         code = code.replace('$TEX_S%d$' % t['index'], '))')
         decl.append('Texture2D %s_texture : register(t%d);\nSamplerState %s_sampler : register(s%d);' % (name, slot, name, slot))
+    decl += builtin_textures(len(info['textures']))
+    if refraction:
+        decl.append('float4x4 cameraMat : register(c5);')
     for k, u in enumerate(info['uniforms']):
-        decl.append('float4 %s : register(c%d);' % (u, 8 + k))
+        decl.append('float4 %s : register(c%d);' % (u, 9 + k))
     cd = ''
     for n, c in ((1, info['cd1']), (2, info['cd2'])):
         if c:
@@ -120,6 +155,7 @@ def to_hlsl(info):
         '  float4 vcolor = Input.VColor; float2 particleTime = Input.ParticleTime; bool isFrontFace = face;',
         '  float2 screenUV = Input.PosP.xy / Input.PosP.w; float meshZ = Input.PosP.z / Input.PosP.w;',
         cd + code,
+        REFRACTION_SUFFIX if refraction else
         '  return float4(emissive + baseColor, opacity * opacityMask + refraction * 0.0 + metallic * 0.0'
         ' + roughness * 0.0 + ambientOcclusion * 0.0 + worldPositionOffset.x * 0.0);',
         '}'])
@@ -142,6 +178,7 @@ def to_hlsl_vs(info, model=False):
         code = code.replace('$TEX_P%d$' % t['index'], '%s_texture.SampleLevel(%s_sampler,GetUV(' % (name, name))
         code = code.replace('$TEX_S%d$' % t['index'], '),0)')
         decl.append('Texture2D %s_texture : register(t%d);\nSamplerState %s_sampler : register(s%d);' % (name, slot, name, slot))
+    decl += builtin_textures(len(info['textures']))
     reg = (7 + 40 * 7) if model else 11
     for n, c in ((1, info['cd1']), (2, info['cd2'])):
         if c and model:
@@ -231,9 +268,12 @@ def check(path):
     info = parse_efkmat(Path(path).read_bytes())
     if info['required']:
         return 'SKIP', 'uses built-in gradient/noise/HSV functions (not reproduced here)'
-    for stage, src, profile in (('pixel shader', to_hlsl(info), 'ps_4_0'),
-                                ('sprite vertex shader', to_hlsl_vs(info), 'vs_4_0'),
-                                ('model vertex shader', to_hlsl_vs(info, model=True), 'vs_4_0')):
+    stages = [('pixel shader', to_hlsl(info), 'ps_4_0')]
+    if info['refraction']:
+        stages.append(('refraction pixel shader', to_hlsl(info, refraction=True), 'ps_4_0'))
+    stages += [('sprite vertex shader', to_hlsl_vs(info), 'vs_4_0'),
+               ('model vertex shader', to_hlsl_vs(info, model=True), 'vs_4_0')]
+    for stage, src, profile in stages:
         ok, msg = compile_hlsl(src, str(path), profile)
         if not ok:
             errors = [line.split(': ', 1)[-1] for line in msg.splitlines() if 'error' in line]

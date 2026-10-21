@@ -23,6 +23,7 @@ of the repository.
 | `tools/gradientmap/` | Gradient-map recolour: greyscale texture through a colour ramp, unlit 1710 `.efkmat` + `edit` spec (with tests). |
 | `tools/hlslcheck/` | Checks that `.efkmat` file materials compile as DirectX HLSL, as the Effekseer editor builds them (Windows, with tests). |
 | `tools/assetinspect/` | Read-only inspection of source assets: binary FBX inventory, texture contact sheets, OBJ wireframes (with tests). |
+| `tools/rdcdigest/` | Digests RenderDoc captures once into a content-addressed store (draw state, cbuffers, textures, meshes, shaders, targets, each kept draw's contribution and post-VS output, dynamic textures it reads, GPU times) and queries it without replaying (README § Digesting RenderDoc captures, with tests). |
 | `tools/ingame/` | Plays animations in a real game project's battle scene on the real GPU: first-cast freeze, frame times, end, per-frame captures. |
 | `tools/effectjob/` | Per-effect manifest, preflight, runner and emitter ledger for multi-system Cascade/Niagara rebuilds (README § Effect manifest and ledger, with tests). |
 | `plugins/` | RPGReactor plugins (mods) for game projects, e.g. `ReactorEffectPreload.js`. |
@@ -340,6 +341,7 @@ the DLL is missing).
 
 ```bash
 python tools/assetinspect/test_assetinspect.py --work out/tests/assetinspect
+python tools/rdcdigest/test_rdcdigest.py --work out/tests/rdcdigest
 python tools/fontatlas/test_make_atlases.py --work out/tests/fontatlas
 node tools/ingame/test_ingame.js --work out/tests/ingame --port 8931
 ```
@@ -560,9 +562,22 @@ against a copy with one value changed; the page then calls
 pixel-identical. Both `tools/parts/render.js` and `tools/parts/gamecam/render.js`
 take it. To keep the random draws in the same order in the copy, narrow a range
 instead of fixing it (zero a `[2.3..9.9]` as `[0, 0.0001]`; see § Procedural
-lightning bolts on new ranges). A `.efkmat` that animates on its own time can
-still differ between seeded plays (`MGC_W3_WindShield`'s sphere nodes do), so
-render the same file twice first and check the pair matches. Worked example:
+lightning bolts on new ranges).
+
+The seed fixes every random: the runtime makes an effect's instances at its first
+update, not in `play`, so seeding right after `play` is early enough (seed 7
+renders the same wherever it sits in a manifest, seed 8 differs). What a seed does
+not fix is a file material's `$TIME$`: it is the renderer's clock, which runs on
+through every earlier play of the same context, so a seeded `.efkmat` part still
+moved with its place in the manifest (a ToonImpact part by up to 189 levels).
+Since 2026-10-18 the gamecam page plays each seeded entry in an Effekseer context
+of its own, so a seeded job no longer depends on the jobs before it; unseeded
+entries share one context as before and render byte-identical to the old page.
+`tools/parts/render.js` (the black contact-sheet page) still shares one context
+for seeded entries too, so render `.efkmat` A/B pairs with the gamecam page, or
+render the same file twice and check the pair matches (`MGC_W3_WindShield`'s
+sphere nodes differed between seeded plays there). Probe and numbers:
+`out/edits/backdrop-harness-tools-20261018/` (`order.json`, `scratch/cmp.py`). Worked example:
 `out/edits/wind-motion-fix-20261008/` (`scratch/pass2.py`, `analyze_motion.py`).
 
 ```bash
@@ -720,7 +735,10 @@ A part at the 90th percentile is about four times the size of one at the 10th,
 which is the mismatch two parts picked at random would typically show.
 
 **A blank thumbnail is not proof of a dead part.** BackDistortion draws nothing
-in this harness at all, which is a known limitation and not a broken part. A
+in this harness at all, which is a known limitation and not a broken part: this
+page does not capture the backdrop, and it is a flat colour, which a distortion
+leaves as it was. Check distortion with `verify.html?backdrop=checker`
+(§ Render harness). A
 part lifted with its chain but none of its siblings can also look nothing like
 it does in its source effect, so a thumbnail is a hint rather than a promise.
 Where the brightest frame lands in the last tenth of a part's run, the sheet
@@ -1678,6 +1696,31 @@ python -m http.server 8731 --bind 127.0.0.1
 Then open `http://127.0.0.1:8731/`. Drop any `.efkefc` plus its textures into
 that folder and edit the `SLOTS` list at the top of the script to point at it.
 
+**BackDistortion and refraction materials.** Both pages and the gamecam page
+(`tools/parts/gamecam/batch.html`) create their WebGL canvas the way the game
+overlay does (`reactor_core.js`: `alpha: true, premultipliedAlpha: false`), call
+`ctx.captureBackground` after drawing the backdrop and before `ctx.draw()`, as
+the game does before each animation, and set alpha to 1 after drawing, before
+readback. Until 2026-10-18 they used `alpha: false`, and on an alpha-less canvas
+WebGL1 cannot copy the framebuffer into the runtime's RGBA background texture:
+`captureBackground` failed with `GL_INVALID_OPERATION` and BackDistortion nodes
+drew dark smudges from an empty background (on black, nothing). That was the
+"distortion draws nothing in the harness" mystery. A distortion bends what is
+behind it, so it shows only over a patterned backdrop:
+`verify.html?backdrop=checker&f=<effect>` counts pixels changed against the
+checker. The stock `sample/00_Basic/Simple_Distortion` ring now changes 535 px
+there, all of them still checker colours, where the old page drew 3,471 dark
+pixels (`out/edits/backdrop-harness-tools-20261018/distortion-old-vs-new.png`).
+A refraction file material that reads the background (the prototype in
+`out/edits/bd2-backdrop-read-20261018`) now draws on the gamecam page's grey: its `1 - B` probe disc changes 5,072 px, peak
+123 (= 1 - grey), and drew nothing before. Renders without a BackDistortion node or
+refraction material are byte-identical to the old pages (35 gamecam parts, 11
+`verify.html` effects on black and on the checker, `index.html`'s five slots);
+`index.html`'s ColumnExplode differs only on a frame where its BackDistortion node
+`ExploAnimDist` draws. The captured background is the frame before the effect, so
+a layer that reads it erases the effect's own earlier layers under it, as in the
+game.
+
 ## In-game test tool
 
 `tools/ingame/` answers "how does this effect run in the game", which the
@@ -2296,6 +2339,241 @@ inspected, 1 at least one file could not be (fully) inspected — the report is
 still written and names the reason — and 2 for a usage error, no matching
 input, or a refused output folder (nothing is written). Tests:
 `tools/assetinspect/test_assetinspect.py` (§ Testing).
+
+## Digesting RenderDoc captures
+
+`tools/rdcdigest/rdcdigest.py` opens each `.rdc` once in headless qrenderdoc
+(`rd_digest.py`, RenderDoc 1.46; `--renderdoc <dir>` or `RENDERDOC_DIR`) and
+writes what effect work reads from captures into a store (default
+`out/rdcdigest/`), so later tasks query the store instead of replaying a
+0.4-1.3 GB capture with their own script. Captures are only read.
+
+```bash
+python tools/rdcdigest/rdcdigest.py digest <capture.rdc | folder>... [--ps-list ShaderIndex.csv] [--all]
+python tools/rdcdigest/rdcdigest.py draws --kept --blend additive        # or --shader / --texture / --marker / --target
+python tools/rdcdigest/rdcdigest.py draw <capture id> <eid> [--cbuffers] [--json]
+python tools/rdcdigest/rdcdigest.py texture <hash prefix> --png out.png [--mip N]   # static or dynamic
+python tools/rdcdigest/rdcdigest.py contrib <capture id> <eid> --png out.png [--scale K] [--abs] [--full]
+python tools/rdcdigest/rdcdigest.py postvs <capture id> <eid> [--attr TEXCOORD1] [--csv out.csv] [--group 4]
+python tools/rdcdigest/rdcdigest.py dynamic <capture id>                  # scene colour/depth etc. kept draws read
+python tools/rdcdigest/rdcdigest.py exposure <capture id>                 # 1x1 targets (eye adaptation) per write
+python tools/rdcdigest/rdcdigest.py gpu <capture id> [--kept] [--top N]
+python tools/rdcdigest/rdcdigest.py stats                                 # store size, blobs shared across captures
+```
+
+Per capture, `captures/<id>/manifest.json` lists every draw and dispatch: event
+id, marker path, counts, each stage's DXBC checksum (the same checksum UE
+`ShaderIndex.csv` files carry) and md5, blend/depth-stencil/raster state
+(shared tables), viewport and scissor, render and depth targets, every SRV with
+its register, view format, size and content hash, samplers, every constant
+buffer as raw bytes (`tables.cbdata`, once per content) plus decoded variables
+when the shader kept its reflection names, the vertex input layout and the
+vertex/index ranges the draw reads, and `gpu_us`. `final.png` is the swap buffer
+the frame's last Present shows: a flip-model swap chain (D3D12) has two or three and presents a different one each
+frame, so the buffer is the one the Present action names (until 2026-10-19 the first swap buffer was saved, a stale
+image on all 50 OT0 captures; `digest --final-only` redoes just `final.png` and the manifest's `final` of a digested
+capture, about 20 s each). Every capture so far presents an R10G10B10A2 swap chain, which `final.png` rounds to
+8 bits; since 2026-10-20 `final.dds` beside it keeps the buffer's exact bits. `rt/` holds each colour target the kept draws write while depth
+tested (effect passes, not UI or post) before the first and after the last of
+them, as a PNG (8-bit, clamped) and a ZIP-compressed EXR with the exact values
+(half targets stay half; depth as `Z` float32 + `S` stencil), plus the depth
+buffer before each such pass, stored once per distinct content.
+
+Blobs are content addressed and shared across captures: `blobs/textures/<md5>.dds`
+(RenderDoc's DDS: native format, all mips and slices, BCn left compressed; typeless
+written as UNORM, the view format is in the manifest), `blobs/meshes/<md5>.bin`,
+`blobs/buffers/<md5>.bin` (buffer SRVs), `blobs/shaders/<checksum>.dxbc|.asm|.json`,
+`blobs/postvs/<md5>.bin` and `blobs/dynamic/<md5>.exr|.png|.dds`.
+They are written only for kept draws: blending enabled on a bound target, a
+marker path matching `--marker-re` (effect/particle/Niagara/Cascade/... names),
+or a pixel-shader checksum in `--ps-list` (a checksum list or a UE
+`ShaderIndex.csv`); `--all` keeps every draw. TS captures have no markers, and
+their masked effect materials draw with blending off, so pass the game's
+`ShaderIndex.csv`: without it the blend rule misses them (89 of 240 effect
+draws in the portal pilot). Hashes are recorded for every draw either way.
+
+Digest version 2 adds, each on by default and recorded in `options`:
+
+- **Contributions** (`--contrib depth|all|off`, default `depth`: kept draws with a
+  depth target, i.e. scene passes, not UI/post). For each colour target, the
+  draw's own change: after the draw minus before it (before = the last event
+  that wrote the target, from RenderDoc's resource usage), cropped to the box of
+  pixels whose bits changed, as a ZIP EXR in `captures/<id>/contrib/<eid>_<slot>.exr`
+  (HALF channels; `--contrib-dtype float` for FLOAT) plus a PNG thumbnail of
+  |change| (at most 128 px, white = the 99.5th percentile, `thumb_white`). The
+  manifest row's `contrib` has the box, `before_eid`, changed pixels and the
+  per-channel sum/min/max; a draw that changed nothing says `changed: false`.
+  Half rounding adds up over a pass: summing the 120-127 half contributions of
+  the TS portal's translucency pass rebuilt 97.4-99.2 % of its pixels bit for
+  bit (largest error 0.27); with `--contrib-dtype float` (about 1.8x the size)
+  every pixel came back exact. `--contrib-threshold T` shrinks each box to
+  pixels changing by more than T.
+- **Post-VS output** (`--postvs depth|all|off`, same default as contributions;
+  `--postvs-cap MB` per draw, default 32): `GetPostVSData` VS out (and GS out,
+  or DS out with tessellation) of every kept scene draw as `blobs/postvs/<md5>.bin`, with the index blob, instance stride, vertex
+  count, RenderDoc's near/far guess and the layout (`tables.postvs_layout`:
+  RenderDoc's D3D11 stream-out puts the position first, every element as 32-bit
+  components). `postvs` prints each instance's (or `--group N` vertices') screen
+  centre, size in pixels, z/w and w in the draw's viewport, and `--attr` one
+  output (colour, UV...).
+- **Dynamic textures** (`--no-dynamic`, `--dynamic-cap MB`, default 64):
+  render targets, UAVs and depth that a draw reads (scene colour and depth copies,
+  UE GPU-particle state, LUTs) get a content hash at every use and, for kept
+  draws, a snapshot at the first kept draw that reads each distinct content:
+  float and D32 formats as exact ZIP EXR (R11G11B10 as half, which holds it
+  exactly), 8-bit 2D as PNG of the stored bytes, the rest (3D, mips, D24) as
+  DDS. Depth-stencil snapshots are keyed by the depth plane: UE translucency
+  rewrites stencil bits on every draw, so stencil-only changes reuse the
+  snapshot. The SRV entry says `written_at` (the last write before the read)
+  and `hash`; `dynamic <id>` lists them and `texture <hash>` decodes one.
+- **Tiny targets**: every dynamic texture of at most 16 texels (the 1x1 UE eye
+  adaptation, average luminance) has its value after each write in the frame,
+  or at its first read when the frame does not write it. `exposure <id>` prints
+  them; in UE 4.25+ the eye-adaptation x is the exposure multiplier.
+- **GPU time** (`--no-counters`): `gpu_us` per event from `EventGPUDuration`.
+  This is the replay machine (this PC's GPU under RenderDoc replay, one event at
+  a time), not the game's frame timing; the manifest's `gpu` names the GPU.
+- **`--rehash`** (off): hash a texture SRV at every use, not only the first, and
+  store each new version for kept draws. Without it, an SRV whose texture
+  RenderDoc's usage shows written since its first hash (CPU write, copy) is
+  flagged `rewritten`, so a stale hash is visible; `counts.rewritten_srv_uses`
+  totals them.
+- **`--all-resources`** (off): the resources of every draw, not only kept ones (shaders,
+  textures, buffers, meshes, and snapshots of the render targets it reads), while
+  contributions, post-VS output and the `rt/` pass targets stay with the kept draws
+  (`counts.resources_kept`, row `resources_kept`). This is what holds the inputs of the
+  bloom, lighting, tonemap and UI passes. `--all` instead keeps every draw for
+  everything, contributions and post-VS included.
+- **`--buffer-cap MB`** (default 64): larger buffer SRVs are hashed only.
+- **`--dedup`** (off): after digesting, a per-capture file whose bytes equal a blob or another
+  file (e.g. `rt/<target>_after.exr` = the `blobs/dynamic` snapshot the next pass reads)
+  becomes an NTFS hard link to it: 336 MB of the OT2 Boost store. Writers replace files
+  rather than write in place, so a link is never written through.
+- **`--compress`** (off, Windows): after digesting, `compact /exe:lzx` on every file of
+  the store. Lossless and transparent: every reader opens the files as before.
+
+The exact digest (2026-10-20, `out/edits/rdc-yes-digest-pilot-20261020/NOTES.md`) is
+`--all-resources --contrib-dtype float --dynamic-cap 256 --buffer-cap 256 --dedup --compress`:
+every SRV of every draw stored, contributions in float, nothing over the snapshot cap
+(the largest so far, BD2's 8192x8192 R16 shadow maps, are 134 MB). Compressed, one
+capture's store was 19 % of the `.rdc` (OT0), 47 % (BD2), 54 % (TS) and 112 % (OT2
+Boost), against 14-34 % for the default digest.
+
+Vertex blobs hold only the elements the draw reads: element 0 is
+`first_element`, so index `i` reads element `i + base_vertex - first_element`;
+per-instance slots start at `instance_offset`. Index blobs hold the draw's own
+indices. Stripped shaders (UE cooks) have reflection names like `cb0_v3`; for
+those only the raw bytes are kept, and `draw --cbuffers` prints them as float4
+rows, or uint rows when they look like integers.
+
+`texture --png` decodes with Pillow: identical to RenderDoc for BC7 and 8-bit
+formats, but its BC1/BC4 decode differs from RenderDoc's by up to 6 levels.
+`texture --png --via-renderdoc` opens the DDS blob itself in qrenderdoc (not
+the capture) and matches PNGs earlier tasks saved from the captures bit for bit.
+
+Build one incremental SQLite catalogue over all stores (the source stores stay read-only):
+
+```bash
+python tools/rdcdigest/rdcdigest.py index --root "<Exports>" --db out/rdcdigest-index/index.sqlite
+python tools/rdcdigest/rdcdigest.py index --root "<Exports>" --root "<another root>" --rebuild
+python tools/rdcdigest/rdcdigest.py --db out/rdcdigest-index/index.sqlite captures
+python tools/rdcdigest/rdcdigest.py --db out/rdcdigest-index/index.sqlite draws --kept --shader a475c614
+python tools/rdcdigest/rdcdigest.py --db out/rdcdigest-index/index.sqlite where 5cf4ea10
+```
+
+`--root` accepts several directories and store paths directly. The default database is
+`out/rdcdigest-index/index.sqlite`; `--rebuild` clears the catalogue and indexes only the supplied
+roots. Without it, newly discovered stores are added to previously indexed stores. A manifest with
+unchanged nanosecond mtime and byte size is skipped; changed manifests replace their capture rows and
+child rows, and deleted manifests remove them. Blob files are inventoried again on each run, one row
+per file per store. A missing store is removed. Added/updated/removed/skipped captures and elapsed
+seconds are printed. The `draws.vertices` column is the stored vertex input range count for indexed
+draws (NULL when unavailable), and the draw's vertex count for non-indexed draws; `indices` retains
+the manifest's draw count (`numIndices`, also used by RenderDoc for non-indexed draws). If a manifest
+changes during the read, indexing fails and rolls back that run;
+rerun after the digest finishes. Never put the database in a source store or under `Exports`.
+
+All existing read commands accept `--db` in place of `--store`, before or after the command.
+`draws` filters use SQLite; full draw details and buffers load the resolved manifest on demand.
+`captures`, `draws`, and `stats` cover every indexed store (`stats` reports each store separately).
+For a single store, output stays the same. A capture id found in two stores makes database commands
+refuse with both paths: for example, indexing the older repo `out/rdcdigest` together with the Exports
+stores can expose duplicate TS ids. Keep those catalogues separate, or supply non-overlapping roots;
+the tool never chooses a duplicate silently. `where` accepts a hexadecimal hash or shader checksum
+prefix and returns JSON lines with capture, store, event, stage, slot, kind and matched hash. It covers
+all recorded uses, including hashes whose blob was not stored: SRV textures/buffers, shader checksum
+and md5, vertex/index buffers (`ia`, slot -1 for the index buffer), and post-VS/GS buffers.
+
+Scripts can import `digestlib` with `tools/rdcdigest` on `sys.path`. It opens SQLite read-only and
+does not import RenderDoc or replay captures:
+
+```python
+import sys
+sys.path.insert(0, 'tools/rdcdigest')
+import digestlib
+
+with digestlib.open('out/rdcdigest-index/index.sqlite') as d:
+    captures = d.captures(game='OT2')  # also OT0, BD2, TS, or the exact Exports game directory
+    capture = captures[0]['id']
+    rows = d.draws(capture, kept=True, ps='9a3f')
+    # Other filters: shader (any stage), texture, marker (regex), blend, target.
+    # capture may also be a list of ids, or None for all captures.
+    for row in rows:
+        eid = row['eid']
+        manifest_row = d.draw(capture, eid)
+        cb = d.cbuffer(capture, eid, 'ps', 0)
+        raw, float4, uint_rows = cb['raw'], cb['float4'], cb['uint_rows']
+        decoded_variables = cb['decoded']  # None if reflection names were stripped
+        mesh = d.mesh(capture, eid)
+        post = d.postvs(capture, eid)  # optional stage='gs'
+        contribution = d.contrib(capture, eid, slot=0)
+    uses = d.where('5cf4ea10')
+    texture = d.texture('5cf4ea10', mip=0, slice=0)
+    pixels, format_name, size = texture['array'], texture['format'], texture['size']
+    disk_path = d.texture_path('5cf4ea10')
+```
+
+`captures()` returns dictionaries for the indexed metadata (including the store, original `.rdc`
+path/bytes, digest version/options, counts and manifest stat). `draws()` returns manifest draw
+dictionaries with `capture` and `store` added; `draw()` returns the original manifest row as a dict.
+`manifest(capture)` exposes the shared tables when needed. `cbuffer()` returns the exact raw bytes,
+float4 tuples, a dictionary of uint4 rows keyed by row number using `draw --cbuffers`' integer rule,
+and decoded variables if available. Buffer bytes remain in the manifest, not SQLite.
+
+`texture()` returns a dict with an 8-bit NumPy array decoded like `texture --png`, format, `(width,
+height)` and path. Float textures are clamped and depth normalised as in that command; use the returned
+EXR path with `ddsio.read_exr` for raw float channels. PNG/EXR snapshots support only mip 0/slice 0.
+Pillow's BC1/BC4 decode can differ from RenderDoc by up to 6 levels; BC7 and 8-bit formats match.
+`texture_path()` returns a DDS/EXR/PNG filename, refuses ambiguous hash prefixes, and chooses the
+first store in path order when the same hash is stored in several places.
+
+`mesh()` returns `attributes` (NumPy arrays keyed by semantic), the original `indices` array (or
+None), `layout`, and `element_indices` per semantic. The latter maps each draw index or instance to
+its stored attribute row: vertex `i + base_vertex - first_element`, non-indexed
+`vertex_offset + i - first_element`, instance `instance_offset + i // rate - first_element`.
+Primitive-restart indices map to -1; zero-stride buffers always map to row 0. Apply these mappings
+before indexing the attributes; vertex and instance attributes have different row counts. Scalar
+and vector FLOAT/UINT/SINT/UNORM/SNORM formats and packed R10G10B10A2 UNORM/UINT are decoded;
+other packed layouts raise an explicit error. `postvs()` returns the stored `(instances, vertices,
+stride/4)` float32 array, layout, semantic arrays, entry metadata and `(pixel_x, pixel_y, z/w)` arrays,
+using the same helpers as the CLI. `contrib()` returns a float32 array, channel names, box and original
+entry. Missing/unkept data raises an error instead of replaying or inventing values. Use the API as
+a context manager (or call `close()`).
+
+Index/API tests run without RenderDoc:
+`python tools/rdcdigest/test_rdcdigest.py --work out/tests/rdcdigest`.
+Worked replay-to-library copies and fresh comparison outputs:
+`out/edits/rdcdigest-index-codex-20261019/REPORT.md`.
+
+Keep the `.rdc` for what a digest cannot hold: interactive shader debugging
+(stepping a vertex or pixel, register values), arbitrary per-pixel history
+(which draws touched a pixel; contributions cover kept draws only, by box),
+targets at events other than the saved points (non-kept passes such as bloom
+mips, UI, post), data of draws that were not kept (hashed only; rerun with
+`--all` or a wider `--ps-list`), buffer SRVs over 64 MB, MSAA targets, and any
+question nobody anticipated. Pilot numbers (TS portal captures):
+`out/edits/rdc-digest-pilot-20261019/REPORT.md` (v1) and
+`out/edits/rdcdigest-v2-20261019/REPORT.md` (v2).
 
 ## Unreal readers
 

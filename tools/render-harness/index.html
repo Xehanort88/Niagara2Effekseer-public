@@ -80,12 +80,23 @@ function litPixels(gl, w, h) {
   return { lit: n, peak };
 }
 
+// Effects write alpha too: set it to 1 after drawing, so readback and toDataURL give the opaque frame.
+function opaque(gl) {
+  gl.colorMask(false, false, false, true);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.colorMask(true, true, true, true);
+}
+
 function runSlot(slot) {
   return new Promise((resolve) => {
     const canvas = document.getElementById(slot.canvas);
     document.getElementById(slot.title).textContent = slot.label;
 
-    const gl = canvas.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+    // An alpha framebuffer like the game overlay's (reactor_core.js). On an alpha-less canvas WebGL1 cannot copy
+    // the RGB framebuffer into the runtime's RGBA background texture: captureBackground fails
+    // (GL_INVALID_OPERATION) and BackDistortion / refraction materials have no background to read.
+    const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
     if (!gl) { log(slot.file + ': no webgl context'); return resolve({ error: 'no webgl' }); }
 
     const ctx = effekseer.createContext();
@@ -127,7 +138,10 @@ function runSlot(slot) {
       ctx.update(1.0);
       ctx.setProjectionMatrix(proj);
       ctx.setCameraMatrix(view);
+      // The background BackDistortion / refraction materials read, as the game captures it before drawing.
+      ctx.captureBackground(0, 0, canvas.width, canvas.height);
       ctx.draw();
+      opaque(gl);
 
       if (frame > 6) {
         const s = litPixels(gl, canvas.width, canvas.height);

@@ -42,7 +42,11 @@ const tctx = thumb.getContext('2d');
 const logEl = document.getElementById('log');
 function log(s) { logEl.textContent = s; }
 
-const gl = stage.getContext('webgl', { alpha: false, preserveDrawingBuffer: true });
+// An alpha framebuffer like the game overlay's (reactor_core.js: alpha true, premultipliedAlpha false). On an
+// alpha-less canvas WebGL1 cannot copy the RGB framebuffer into the runtime's RGBA background texture, so
+// captureBackground fails (GL_INVALID_OPERATION) and BackDistortion nodes and refraction file materials draw from
+// an empty background: they looked like broken effects here until 2026-10-18.
+const gl = stage.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
 const W = stage.width, H = stage.height;
 const pixbuf = new Uint8Array(W * H * 4);
 
@@ -129,6 +133,15 @@ function touchesEdge(b) {
   return !!b && (b[0] <= 0 || b[1] <= 0 || b[2] >= W - 1 || b[3] >= H - 1);
 }
 
+// Effects write alpha too. Set it to 1 after drawing, so the readback and the thumbnail are the opaque frame the
+// game composites (its overlay sits on the scene), and an alpha-less canvas's pixels stay what they were.
+function opaque() {
+  gl.colorMask(false, false, false, true);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.colorMask(true, true, true, true);
+}
+
 function snapshot() {
   tctx.clearRect(0, 0, thumb.width, thumb.height);
   tctx.drawImage(stage, 0, 0, thumb.width, thumb.height);
@@ -149,10 +162,27 @@ function backgroundName(i) { return BACKGROUNDS[i].some((c) => c > 0) ? 'grey' :
 
 const proj = new Float32Array([H/W,0,0,0, 0,1,0,0, 0,0,1,-1.2, 0,0,0,1]);
 const view = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-10,1]);
-let ctx = null;
+let sharedCtx = null;
 
+function newContext() {
+  const c = effekseer.createContext();
+  c.init(gl, { instanceMaxCount: 32000 });
+  return c;
+}
+
+// A part with a `seed` plays in an Effekseer context of its own, so it renders the same wherever it sits in the
+// manifest. The seed alone is not enough: setRandomSeed right after play does fix every random (the runtime makes
+// the instances at the first update), but a file material's $TIME$ is the renderer's clock, which runs on through
+// every earlier job of a shared context (a ToonImpact part moved by up to 189 levels, 2026-10-18). Unseeded parts
+// share one context as before, so their randoms and $TIME$ still run on from the previous play.
 function renderPart(part, bgIndex) {
-  return new Promise((resolve) => {
+  const seeded = part.seed !== undefined;
+  const ctx = seeded ? newContext() : sharedCtx;
+  return new Promise((done) => {
+    const resolve = (r) => {
+      if (seeded) { try { effekseer.releaseContext(ctx); } catch (e) {} }
+      done(r);
+    };
     const bg = BACKGROUNDS[bgIndex];
     const total = part.frames || 120;
     let effect = null, loadError = null, handle = null;
@@ -201,8 +231,8 @@ function renderPart(part, bgIndex) {
       const stripFrames = new Set(part.strip || []);
       const stripShots = [];
 
-      // An optional per-entry `seed` fixes this play's random numbers. Without it the context's
-      // random state runs on from the previous play, so the same file played twice can differ.
+      // An optional per-entry `seed` fixes this play's random numbers (and gives it a fresh context, above).
+      // Without it the random state runs on from the previous play, so the same file played twice can differ.
       try {
         handle = ctx.play(effect, 0, 0, 0);
         if (part.seed !== undefined) handle.setRandomSeed(part.seed);
@@ -250,7 +280,11 @@ function renderPart(part, bgIndex) {
               gl.viewport(0, 0, W, H);
               ctx.setProjectionMatrix(proj);
               ctx.setCameraMatrix(view);
+              // The backdrop as the background that BackDistortion and refraction materials read, as the game
+              // captures the scene before each animation draws (reactor_sprites.js _doEffekseerDraw).
+              ctx.captureBackground(0, 0, W, H);
               ctx.draw();
+              opaque();
               const m = measure(bg);
               if (onGrid) {
                 trace.push(m.lit);
@@ -288,8 +322,7 @@ async function post(path, body) {
 
 async function main() {
   if (!gl) { await post('/done', { error: 'no webgl context' }); return; }
-  ctx = effekseer.createContext();
-  ctx.init(gl, { instanceMaxCount: 32000 });
+  sharedCtx = newContext();
 
   const manifest = await (await fetch('/manifest')).json();
   const parts = manifest.parts;
