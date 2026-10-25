@@ -46,6 +46,24 @@ def main():
     ap.add_argument('--work', required=True)
     work = ap.parse_args().work
     os.makedirs(work, exist_ok=True)
+    # Execute the real snapshot method without importing RenderDoc. MSAA is
+    # explicitly recorded as unstored, and has no raw-subresource hash.
+    import ast
+    import time
+    from types import SimpleNamespace
+    from pathlib import Path
+    tree = ast.parse(Path(__file__).with_name('rd_digest.py').read_text())
+    snapshot = next(n for cls in tree.body if isinstance(cls, ast.ClassDef)
+                    for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'snapshot')
+    namespace = {'time': time, 'rid': str}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[snapshot], type_ignores=[])),
+                 'rd_digest.snapshot', 'exec'), namespace)
+    fake = SimpleNamespace(last_write=lambda *a: 5, snaps={}, dynamic={}, phase={'dynamic_s': 0.0})
+    row = {}
+    namespace['snapshot'](fake, 7, SimpleNamespace(msSamp=4), row, 10, True)
+    check('MSAA snapshot explicitly unstored', row == {'written_at': 5, 'snapshot': 'msaa: not stored'})
+    namespace['snapshot'](fake, 7, SimpleNamespace(msSamp=4), row, 11, True)
+    check('MSAA snapshot cache read', len(fake.snaps) == 1 and 'raw_md5' not in row)
     for sub in ('cap', 'store'):                     # this test's own folders, from an earlier run
         shutil.rmtree(os.path.join(work, sub), ignore_errors=True)
 
@@ -75,6 +93,14 @@ def main():
     d = ddsio.read_dds(dds_dx10(26, 1, 1, 1, struct.pack('<I', v)))
     ch = ddsio.decode_raw(d)
     check('r11g11b10', [float(ch[c][0, 0]) for c in 'RGB'] == [1.0, 1.0, 1.0])
+
+    # R9G9B9E5 (Unity GI irradiance): shared exponent 16 -> mantissa / 256
+    v = 256 | (128 << 9) | (511 << 18) | (16 << 27)
+    d = ddsio.read_dds(dds_dx10(67, 1, 1, 1, struct.pack('<I', v)))
+    ch = ddsio.decode_raw(d)
+    check('r9g9b9e5', d.format == 'R9G9B9E5_SHAREDEXP' and
+          [float(ch[c][0, 0]) for c in 'RGB'] == [1.0, 0.5, 511 / 256.0], [float(ch[c][0, 0]) for c in 'RGB'])
+    check('r9g9b9e5 png', ddsio.to_image(d).getpixel((0, 0)) == (255, 128, 255, 255))
 
     # depth + stencil
     d = ddsio.read_dds(dds_dx10(20, 1, 1, 1, struct.pack('<fI', 0.25, 0x7F)))

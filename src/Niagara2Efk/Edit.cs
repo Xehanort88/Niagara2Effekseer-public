@@ -1159,6 +1159,9 @@ namespace Niagara2Efk
 				Console.WriteLine("WARNING: {0}: the runtime will not load this effect (Effekseer.Effect.cpp elementCountMax {1}; the game shows no error)", problem, ElementLimits.Max);
 			if (limits.Error != null)
 				Console.WriteLine("WARNING: the runtime's 1024 caps were not all checked: " + limits.Error);
+			foreach (var far in ElementLimits.FarDepthOffsets(Core.Root))
+				Console.WriteLine("WARNING: node {0} ({1}) DepthOffset {2} >= {3}: past RPGReactor's battle-camera near plane for a particle at the effect, it may never draw",
+					far.Path, far.Name, far.DepthOffset.ToString("0.###", CultureInfo.InvariantCulture), ElementLimits.NearPlane.ToString(CultureInfo.InvariantCulture));
 			return ok ? 0 : 1;
 		}
 

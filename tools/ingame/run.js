@@ -30,6 +30,7 @@
 //                          use) and the freeze is an uncovered cast. Tags get
 //                          -pre. The job fails if the plugin is missing or the
 //                          effect was not loaded before the cold play.
+//   --headed               show Chrome for real GPU performance measurements
 //   --port N               default 8901; pick one nobody else is using
 //   --chrome <path>        default C:/Program Files/Google/Chrome/Application/chrome.exe
 //   --max-frames N         time mode: game frames (Graphics.frameCount, 60 per
@@ -58,7 +59,7 @@ const { verdict } = require('./verdict');
 
 const argv = process.argv.slice(2);
 const opts = { multi: { map: [], sub: [], override: [] } };
-const FLAGS = ['preload-id'];
+const FLAGS = ['preload-id', 'headed'];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (!a.startsWith('--')) throw new Error('unexpected argument ' + a);
@@ -156,8 +157,8 @@ async function runOne(j) {
     for (const f of fs.readdirSync(capDir)) if (FRAME_FILE.test(f)) { fs.unlinkSync(path.join(capDir, f)); cleared++; }
   }
   const profile = fs.mkdtempSync(path.join(OUT, '.chrome-'));
-  const chrome = spawn(chromePath, ['--headless=new', '--use-angle=d3d11', '--ignore-gpu-blocklist', '--enable-gpu', '--no-first-run',
-    '--no-default-browser-check', '--window-size=1280,720', '--user-data-dir=' + profile, `http://127.0.0.1:${port}/`], { stdio: 'ignore' });
+  const chrome = spawn(chromePath, [...(opts.headed ? [] : ['--headless=new']), '--use-angle=d3d11', '--ignore-gpu-blocklist', '--enable-gpu', '--no-first-run',
+    '--no-default-browser-check', '--window-size=1280,720', '--user-data-dir=' + profile, ...(opts.headed ? ['--app=' + `http://127.0.0.1:${port}/`] : [`http://127.0.0.1:${port}/`])], { stdio: 'ignore' });
   chrome.once('error', (e) => { if (pending) pending({ runnerError: 'Chrome failed: ' + e.message }); });
   let timer;
   const result = await Promise.race([
@@ -167,7 +168,7 @@ async function runOne(j) {
   clearTimeout(timer); pending = null;
   await new Promise((r) => { chrome.once('exit', r); try { chrome.kill(); } catch (e) { r(); } setTimeout(r, 5000); });
   try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
-  return { tag: j.tag, ...result, servedEffectFiles: served.slice(), ...(cleared ? { clearedStaleFrames: cleared } : {}) };
+  return { tag: j.tag, ...result, ...(opts.headed ? {headed: true} : {}), servedEffectFiles: served.slice(), ...(cleared ? { clearedStaleFrames: cleared } : {}) };
 }
 
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `port ${port} is busy: pick another with --port` : e); process.exit(2); });

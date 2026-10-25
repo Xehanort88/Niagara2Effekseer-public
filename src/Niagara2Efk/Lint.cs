@@ -81,6 +81,8 @@ namespace Niagara2Efk
 			public List<ElementLimits.Count> Elements { get; set; } = new List<ElementLimits.Count>();
 			/// <summary>Why some counts are missing (the exporter failed), else null.</summary>
 			public string ElementsError { get; set; }
+			/// <summary>Drawn nodes whose DepthOffset reaches RPGReactor's near plane (analyse mode only).</summary>
+			public List<ElementLimits.DepthNode> DepthOffsets { get; set; } = new List<ElementLimits.DepthNode>();
 		}
 		public class CacheEntry
 		{
@@ -116,6 +118,8 @@ namespace Niagara2Efk
 			public int LimitFindings { get; set; }
 			/// <summary>Target effects whose capped counts could not all be taken.</summary>
 			public int UncountedEffects { get; set; }
+			/// <summary>DEPTH warnings (ElementLimits.FarDepthOffsets): they do not change the exit status.</summary>
+			public int DepthFindings { get; set; }
 			// Complete is false when any target effect could not be read (or none
 			// was found): the findings then cover only the readable ones.
 			public int TargetEffects { get; set; }
@@ -262,6 +266,7 @@ namespace Niagara2Efk
 					{
 						var limits = ElementLimits.Measure();
 						result.Elements = limits.Counts; result.ElementsError = limits.Error;
+						result.DepthOffsets = ElementLimits.FarDepthOffsets(Core.Root);
 					}
 				}
 			}
@@ -271,6 +276,7 @@ namespace Niagara2Efk
 				result.Error = e.GetType().Name + ": " + e.Message;
 				result.Curves.Clear();
 				result.Elements.Clear();
+				result.DepthOffsets.Clear();
 			}
 			finally
 			{
@@ -452,6 +458,13 @@ namespace Niagara2Efk
 						report.LimitFindings++;
 						Console.WriteLine("  LIMIT {0}: the runtime refuses to load this effect (Effekseer.Effect.cpp elementCountMax; the game shows no error)", problem);
 					}
+					// A warning, not a cap: a node placed past the camera can draw only because of its offset.
+					foreach (var far in effect.DepthOffsets)
+					{
+						report.DepthFindings++;
+						Console.WriteLine("  DEPTH node {0} ({1}) DepthOffset {2} >= {3}: past RPGReactor's battle-camera near plane for a particle at the effect, it may never draw",
+							far.Path, far.Name, F(far.DepthOffset), ElementLimits.NearPlane.ToString(CultureInfo.InvariantCulture));
+					}
 					if (effect.ElementsError != null || nodes == null)
 					{
 						report.UncountedEffects++;
@@ -472,6 +485,9 @@ namespace Niagara2Efk
 				report.Complete = report.TargetEffects > 0 && report.UnreadableEffects == 0 && report.UncountedEffects == 0;
 				if (json != null) SaveJson(json, report);
 				Console.WriteLine("LINT: {0} effects, {1} ours / {2} pack findings, {3} unreadable effects (runtime {4})", report.Effects.Count, report.OursFindings, report.PackFindings, report.UnreadableEffects, runtime);
+				if (report.DepthFindings > 0)
+					Console.WriteLine("LINT DEPTH: {0} drawn node(s) with a DepthOffset at or past RPGReactor's near plane ({1} units; DEPTH lines above): check they draw (exit status unchanged)",
+						report.DepthFindings, ElementLimits.NearPlane.ToString(CultureInfo.InvariantCulture));
 				if (report.LimitFindings > 0)
 					Console.WriteLine("LINT LIMIT: {0} count(s) over the runtime's cap of {1} (LIMIT lines above): the game will not load those effects", report.LimitFindings, ElementLimits.Max);
 				// An unreadable comparison corpus (e.g. a sandbox that cannot see the corpus drive) was only on the

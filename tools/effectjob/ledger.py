@@ -58,6 +58,9 @@ def sequence_systems(m):
     seq = m.get('sequence') or {}
     if not seq.get('file'):
         return None
+    if seq.get('format') == 'ue5':
+        lo,hi=seq.get('range',[0,float('inf')])
+        return [q for q in m['_sequence_inventory'] if any(lo <= f < hi for f in q['start_frames'])]
     d = json.loads(MF.path(seq['file']).read_text(encoding='utf-8'))
     out = []
     for b in d.get('bindings') or []:
@@ -149,7 +152,7 @@ def build_rows(m, variant, work, pre):
     seq_of = {}
     if seq is not None:
         for q in seq:
-            hit = [s for s in m['systems'] if Path(str(s['source'])).stem == q['stem']]
+            hit = [s for s in m['systems'] if (s.get('actor') == q['binding'] if (m.get('sequence') or {}).get('format')=='ue5' else Path(str(s['source'])).stem == q['stem'])]
             if hit:
                 seq_of[hit[0]['id']] = q
                 continue
@@ -231,7 +234,7 @@ def build_rows(m, variant, work, pre):
                         c['built'] = cell('gap', '%d node(s) named %s for %d emitter(s) of that name'
                                           % (len(primary), r['name'], name_count[r['name']]))
                     elif skip:
-                        c['built'] = cell('explained', 'builder skip: ' + skip)
+                        c['built'] = cell('explained', ('pending recipe (Claude Code): ' if 'no recipe' in skip else 'builder skip: ') + skip)
                     else:
                         why = [l for l in notes if l.startswith(r['name'] + ': ')
                                and re.search(r'not imported|not found|missing|not converted', l)]

@@ -41,6 +41,25 @@ def pure():
     s = ea.spline4([0, 0], [1, 1], [1, 2], [0, 3])
     check('spline4 sets all four points', all('Shape/Point%d' % i in s for i in range(1, 5)))
     check('facet_uv is divisions minus one', ea.facet_uv(7, 5)['UV/UVSize'] == [6, 4])
+    R = 'DrawingValues/Ribbon/'
+    rib = {'DrawingValues/Type': 'Ribbon', R + 'ViewpointDependent': True, R + 'ColorAll': 'Easing',
+           R + 'ColorAll_Easing/Start': [255, 0, 200, 255], R + 'ColorAll_Easing/End': [255, 255, 200, 0], R + 'SplineDivision': 4,
+           'ScalingValues/Fixed/Scale': [2, 2, 2]}
+    t, why = ea.ribbon_as_track(rib)
+    check('ribbon_as_track: a camera-facing ribbon becomes a Track, its colour easing in all six slots, size 1, spline kept',
+          why is None and t['DrawingValues/Type'] == 'Track' and not any(k.startswith(R) for k in t)
+          and all(t['DrawingValues/%s/Type' % s_] == 'Easing' and t['DrawingValues/%s/Easing/End' % s_] == [255, 255, 200, 0]
+                  for s_ in ea.TRACK_COLOUR_SLOTS)
+          and t['DrawingValues/Track/TrackSizeMiddle_Fixed'] == 1.0 and t['DrawingValues/Track/SplineDivision'] == 4
+          and t['ScalingValues/Fixed/Scale'] == [2, 2, 2], (why, t))
+    t, why = ea.ribbon_as_track(dict(rib, **{R + 'Position': 'Fixed', R + 'Position_Fixed_L': -0.3, R + 'Position_Fixed_R': 0.3}))
+    check('ribbon_as_track: a centred Fixed position becomes the Track size R - L', why is None
+          and abs(t['DrawingValues/Track/TrackSizeFor_Fixed'] - 0.6) < 1e-9, t.get('DrawingValues/Track/TrackSizeFor_Fixed'))
+    kept = [ea.ribbon_as_track(dict(rib, **x))[1] for x in ({R + 'ColorAll': 'Random'}, {R + 'ViewpointDependent': False},
+                                                            {R + 'Position': 'Fixed', R + 'Position_Fixed_L': -0.2, R + 'Position_Fixed_R': 0.6})]
+    check('ribbon_as_track keeps a Ribbon (with its reason) for a Random colour, a non-facing ribbon, an off-centre position',
+          all(kept), kept)
+    check('ribbon_as_track leaves a sprite alone', ea.ribbon_as_track({'DrawingValues/Type': 'Sprite'}) == ({'DrawingValues/Type': 'Sprite'}, None))
 
 
 def built(work, tool):

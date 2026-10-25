@@ -173,22 +173,25 @@ def presented_buffer(ctrl, D, present, swap):
     two or three buffers and presents a different one each frame: OT0's captures present ResourceId 380 of 379-381,
     and saving swap[0] gave a stale image (max difference 255, up to 63 % of pixels off by more than 2 levels;
     out/edits/rdc-digest-finalframe-ag-20261019). In order: the action's copy destination, the buffer its name gives
-    ('Present(ResourceId::380)'), the swap buffer written last at or before the Present, the first swap buffer."""
+    ('Present(ResourceId::380)'), the swap buffer written last before the Present, the first swap buffer. The first two
+    only count when the frame wrote that buffer before the Present: a D3D11 flip-model chain (Unity, WotR) draws the
+    frame into one buffer (457) while its Present names the other (458) as copy destination, which saves black."""
     ids = {rid(t.resourceId): t.resourceId for t in swap}
+    written = {}
+    for t in swap:
+        uses = [u.eventId for u in ctrl.GetUsage(t.resourceId) if u.eventId < present.eventId
+                and enum(u.usage) in WRITE_USAGE]
+        if uses:
+            written[rid(t.resourceId)] = max(uses)
     dst = getattr(present, 'copyDestination', None)
-    if dst is not None and rid(dst) in ids:
+    if dst is not None and rid(dst) in ids and (rid(dst) in written or not written):
         return ids[rid(dst)], "the Present action's copy destination"
     m = re.search(r'ResourceId::(\d+)', present.GetName(D.sdf) or '')
-    if m and m.group(1) in ids:
+    if m and m.group(1) in ids and (m.group(1) in written or not written):
         return ids[m.group(1)], 'named by the Present action'
-    best = None
-    for t in swap:
-        uses = [u.eventId for u in ctrl.GetUsage(t.resourceId) if u.eventId <= present.eventId
-                and enum(u.usage) in WRITE_USAGE]
-        if uses and (best is None or max(uses) > best[0]):
-            best = (max(uses), t.resourceId)
-    if best is not None:
-        return best[1], 'the swap buffer written last before the Present'
+    if written:
+        last = max(written, key=written.get)
+        return ids[last], 'the swap buffer written last before the Present (eid %d)' % written[last]
     return swap[0].resourceId, 'the first swap buffer (no other evidence)'
 
 
@@ -384,6 +387,7 @@ class Digest:
             return
         t0 = time.time()
         ent = {}
+        raw = ''
         if t.msSamp > 1:
             ent['snapshot'] = 'msaa: not stored'
         else:
@@ -415,7 +419,7 @@ class Digest:
                         d['texel_hex'] = bytes(self.ctrl.GetTextureData(res, rd.Subresource(0, 0, 0))).hex()
         if ent.get('hash') and raw.startswith('z') and self.dynamic.get(ent['hash'], {}).get('raw_md5') != raw:
             ent['note'] = 'depth plane as in the snapshot; stencil may differ'
-        if raw.startswith('z') and ent.get('hash') in self.dynamic:
+        if ent.get('hash') in self.dynamic and ent.get('raw_md5', '').startswith('z'):
             self.dynamic[ent['hash']]['keyed_by'] = 'depth plane (stencil-only changes reuse this snapshot)'
         self.snaps[key] = ent
         e.update({x: ent[x] for x in ('hash', 'stored', 'snapshot', 'raw_md5') if x in ent})

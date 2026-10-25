@@ -116,10 +116,17 @@ def build_variant(m, task, variant, env, results):
     tool = MF.tool(m)
     fails = []
     lines = results['build'].setdefault(variant, [])
+    for system in m['systems']:
+        if system.get('_staging'):
+            f=Path(system['params_file']);f.parent.mkdir(parents=True,exist_ok=True)
+            f.write_text(json.dumps(system['_staging'],indent=1),encoding='utf-8')
+    if m.get('_clock_mapping'):
+        (task/'clock-mapping.json').write_text(json.dumps(m['_clock_mapping'],indent=1),encoding='utf-8')
     for s, b, argv in MF.builds(m, variant):
         argv[0] = str(work)
-        if s['builder'] == 'cascade':
-            cmd = [sys.executable, '-B', str(MF.CHECK_BUILD)] + argv
+        if MF.cascade_like(s):
+            cmd = ([sys.executable, '-B', str(MF.CHECK_BUILD)] + {'cascade-port': ['--port'], 'cascade-ts': ['--ts']}.get(
+                s['builder'], []) + argv)
         else:
             meshes = (m.get('inputs') or {}).get('meshes')
             if meshes:     # build_niagara reads <work>/mesh/Model only
@@ -131,7 +138,7 @@ def build_variant(m, task, variant, env, results):
         code, out = run_logged(cmd, work / (b['name'] + '.check.log'), env, work / 'build' / (b['name'] + '.argv.json'),
                                {'system': s['id'], 'builder': s['builder'], 'git': git_head(),
                                 'builder_argv': [str(MF.BUILDERS[s['builder']])] + argv})
-        if s['builder'] == 'cascade':
+        if MF.cascade_like(s):
             last = [l for l in out.splitlines() if l.startswith('CASCADE BUILD ')]
             line = last[-1] if last else 'CASCADE BUILD FAIL %s: no result line (exit %d)' % (b['name'], code)
             for l in out.splitlines():
@@ -167,6 +174,17 @@ def build_variant(m, task, variant, env, results):
         log('  ' + lines[-1])
         if not ok:
             fails.append('combine')
+    # A combined HDR effect must retain its metadata; differing grades cannot be flattened into one handle.
+    hdr_files = [work / 'build' / (b['name'] + '.hdr.json') for s, b, _ in MF.builds(m, variant)]
+    if any(p.exists() for p in hdr_files):
+        try:
+            sides = [json.loads(p.read_text(encoding='utf-8')) for p in hdr_files]
+            if any((x['grade'], x['bloom']) != (sides[0]['grade'], sides[0]['bloom']) for x in sides):
+                raise ValueError('combined HDR systems require the same grade and bloom')
+            side = dict(sides[0], fallback=final.stem.removesuffix('-hdr') + '-ldr')
+            final.with_suffix('.hdr.json').write_text(json.dumps(side, indent=2) + '\n', encoding='utf-8')
+        except (OSError, ValueError, KeyError) as ex:
+            lines.append('HDR FAIL: ' + str(ex)); fails.append('hdr')
     if final.is_file():
         code, out = run_logged(['dotnet', str(tool), 'lint', str(final), '--strict', '--catalogue',
                                 str(ROOT / 'out/catalogue.json')], work / (final.stem + '.lint.log'), env)

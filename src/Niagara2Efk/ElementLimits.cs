@@ -104,6 +104,39 @@ namespace Niagara2Efk
 			return false;
 		}
 
+		/// <summary>RPGReactor's battle camera (js/reactor_sprites.js Sprite_Animation: view z -10, projection
+		/// w = 1 - 1.2 z) clips everything nearer than 10.4545 units from the effect along the view axis.
+		/// DepthOffset moves a particle that far toward the camera (EffekseerRendererCommon
+		/// ApplyDepthParameters, no clamp), so from this offset on a particle at the effect is never drawn:
+		/// Geodesic Shield's 11.25 glow (measured: draws at 10.3, gone at 10.6,
+		/// out/edits/depthoffset-audit-20261019).</summary>
+		public const float NearPlane = 10.4545f;
+
+		public class DepthNode
+		{
+			public string Path { get; set; }
+			public string Name { get; set; }
+			public float DepthOffset { get; set; }
+		}
+
+		/// <summary>Every drawn node (dump paths) whose DepthOffset reaches RPGReactor's near plane.
+		/// A node placed past the camera can still draw because of it (OT0 Fire's Flash_Camera at Z 60),
+		/// so this is a warning, not a cap.</summary>
+		public static List<DepthNode> FarDepthOffsets(NodeBase parent, string path = "")
+		{
+			var found = new List<DepthNode>();
+			for (int i = 0; i < parent.Children.Count; i++)
+			{
+				string p = path.Length == 0 ? i.ToString(System.Globalization.CultureInfo.InvariantCulture) : path + "/" + i;
+				var child = parent.Children[i];
+				if (child is Node node && node.IsRendered.Value && node.DrawingValues.Type.Value != RendererValues.ParamaterType.None
+					&& node.DepthValues.DepthOffset.Value >= NearPlane)
+					found.Add(new DepthNode { Path = p, Name = node.Name.Value, DepthOffset = node.DepthValues.DepthOffset.Value });
+				found.AddRange(FarDepthOffsets(child, p));
+			}
+			return found;
+		}
+
 		/// <summary>One line per count over the cap.</summary>
 		public static IEnumerable<string> Problems(IEnumerable<Count> counts) =>
 			counts.Where(c => c.Over).Select(c => string.Format("{0} {1} > {2}", c.Name, c.Value, c.Limit));

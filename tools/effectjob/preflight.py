@@ -27,6 +27,26 @@ def _builder_module():
     return B
 
 
+def ts_dossier_problems(m, s):
+    """cascade-ts: the system's dossier (its annotated shaders, which the TS oracle compiles) in --tsport-dossiers."""
+    sys.path.insert(0, str(MF.ROOT / 'tools' / 'cascade' / 'tsport'))
+    import ts_bake
+    out = []
+    for vk in MF.variants(m):
+        for s_, b, argv in MF.builds(m, vk):
+            if s_ is not s:
+                continue
+            ts_bake.DOSSIERS = [Path(d) for v in MF.flag_values(argv[2:], '--tsport-dossiers') for d in v.split(os.pathsep)]
+            src = MF.path(s['source']).with_suffix('')
+            parts = src.parts
+            rel = Path(*parts[len(parts) - parts[::-1].index('Content'):]) if 'Content' in parts else Path(src.name)
+            try:
+                ts_bake.find_dossier(rel)
+            except ValueError as e:
+                out.append('system %s, build %s: %s' % (s['id'], b['name'], e))
+    return list(dict.fromkeys(out))
+
+
 def cascade_emitters(m, s):
     """[(index, Emitter)] of a Cascade system; NIAGARA_FIELDS from the manifest must be set before vector_field()."""
     import cascade as C
@@ -34,6 +54,8 @@ def cascade_emitters(m, s):
 
 
 def build_of(s, name):
+    if s['builder'] == 'niagara' and name in (s.get('excluded') or {}):
+        return None
     hits = [b['name'] for b in s['builds'] if not b.get('only') or name in b['only']]
     return hits[0] if hits else None
 
@@ -61,7 +83,13 @@ def check_cascade_emitter(m, s, em, by_name, B, C):
         return rec
     mref = em.required.p.get('Material')
     mat = C.Material(MF.path(m['exports']), mref)
-    recipe = C.ue418.recipe_for(mat, B.RECIPES.get(mat.master))
+    rec_ = B.RECIPES.get(mat.master)
+    if rec_ is None and s.get('builder') == 'cascade-port':
+        import ot2port      # masters only the original-asset port draws (ky_flare01_primitive, ky_PolarGlow)
+        rec_ = (lambda *a: None) if mat.master in ot2port.PORTED_MASTERS else None
+    if rec_ is None and s.get('builder') == 'cascade-ts' and mat.master == 'M_EF_Common_GPU_00':
+        rec_ = lambda *a: None      # the TS kit's ts_bake registers it (tools/cascade/tsport)
+    recipe = C.ue418.recipe_for(mat, rec_)
     if not recipe and not mref:
         rec['skip'] = 'no material: a helper emitter, not drawn'
         return rec
@@ -125,7 +153,7 @@ def run(m):
     B = C = None
     for s in m['systems']:
         excluded, accept = s.get('excluded') or {}, s.get('accept') or {}
-        if s['builder'] == 'cascade':
+        if MF.cascade_like(s):
             if B is None:
                 B = _builder_module()
                 import cascade as C
@@ -134,6 +162,8 @@ def run(m):
             except Exception as e:      # not a dump the reader knows: say so, do not guess
                 probs.append('system %s: cannot read %s (%s: %s)' % (s['id'], s['source'], type(e).__name__, e))
                 continue
+            if s['builder'] == 'cascade-ts':
+                probs += ts_dossier_problems(m, s)
             by_name = {}
             for _, e_ in ems:
                 by_name.setdefault(e_.name, e_)

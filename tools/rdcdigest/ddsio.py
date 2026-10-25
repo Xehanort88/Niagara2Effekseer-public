@@ -22,7 +22,7 @@ DXGI = {
     41: ('R32_FLOAT', 4, False), 42: ('R32_UINT', 4, False), 44: ('R24G8_TYPELESS', 4, False),
     45: ('D24_UNORM_S8_UINT', 4, False), 49: ('R8G8_UNORM', 2, False), 54: ('R16_FLOAT', 2, False),
     55: ('D16_UNORM', 2, False), 56: ('R16_UNORM', 2, False), 61: ('R8_UNORM', 1, False), 62: ('R8_UINT', 1, False),
-    65: ('A8_UNORM', 1, False),
+    65: ('A8_UNORM', 1, False), 67: ('R9G9B9E5_SHAREDEXP', 4, False),
     70: ('BC1_TYPELESS', 8, True), 71: ('BC1_UNORM', 8, True), 72: ('BC1_UNORM_SRGB', 8, True),
     73: ('BC2_TYPELESS', 16, True), 74: ('BC2_UNORM', 16, True), 75: ('BC2_UNORM_SRGB', 16, True),
     76: ('BC3_TYPELESS', 16, True), 77: ('BC3_UNORM', 16, True), 78: ('BC3_UNORM_SRGB', 16, True),
@@ -177,6 +177,11 @@ def decode_pixels(fmt, b, w, h):
         a = np.frombuffer(b, '<u4').reshape(h, w).astype(np.int64)
         return {'R': _half_from_bits(a & 0x7FF, 6), 'G': _half_from_bits((a >> 11) & 0x7FF, 6),
                 'B': _half_from_bits((a >> 22) & 0x3FF, 5)}
+    if f == 'R9G9B9E5_SHAREDEXP':
+        # three 9-bit mantissas sharing the top 5 bits as exponent (bias 15, no implicit 1): Unity's GI irradiance
+        a = np.frombuffer(b, '<u4').reshape(h, w).astype(np.int64)
+        k = np.exp2((a >> 27).astype(np.float64) - 24)
+        return {c: (((a >> s) & 511) * k).astype(np.float32) for c, s in zip('RGB', (0, 9, 18))}
     if f == 'R10G10B10A2_UNORM':
         a = np.frombuffer(b, '<u4').reshape(h, w)
         return {'R': ((a & 1023) / 1023.0).astype(np.float32), 'G': (((a >> 10) & 1023) / 1023.0).astype(np.float32),

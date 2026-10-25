@@ -158,6 +158,55 @@ def hidden():
     return {'DrawingValues/Type': 'None'}
 
 
+TRACK_COLOUR_SLOTS = ('TrailColorLeft', 'TrailColorLeftMiddle', 'TrailColorCenter', 'TrailColorCenterMiddle',
+                      'TrailColorRight', 'TrailColorRightMiddle')
+
+
+def ribbon_as_track(settings):
+    """(settings, reason) for a camera-facing Ribbon drawn as a Track. Effekseer's ViewpointDependent ribbon lays its
+    width along R = U x view, with U the point's own up axis (EffekseerRenderer.RibbonRendererBase.h: from the point's
+    rotation; world up for an unrotated point), not the trail's direction: a trail running sideways on screen turns
+    edge-on (a Unity study effect's blades lit half the game's pixels). A Track lays it along R = trail direction x
+    view (TrackRendererBase.h), as UE and Unity screen-facing trails do. Same UVs (TrailRendererUtils::AssignUVs),
+    same per-point colour over each point's age, same width (size x the point's scale X): Ribbon/ColorAll goes to all
+    six Track colour slots, a Default position (-0.5..0.5) to TrackSize 1, Fixed L/R to R - L, Ribbon/SplineDivision
+    to Track/SplineDivision. Kept a Ribbon (reason says why): not camera-facing; a Random colour (each Track slot
+    draws its own random, so a range would streak across the strip); an off-centre Fixed position; Fixed edge colours.
+    Returns the settings unchanged (and reason None) for anything that is not a Ribbon."""
+    if settings.get('DrawingValues/Type') != 'Ribbon':
+        return settings, None
+    R = 'DrawingValues/Ribbon/'
+    if not settings.get(R + 'ViewpointDependent'):
+        return settings, 'not camera-facing'
+    kind = settings.get(R + 'ColorAll', 'Fixed')
+    if kind not in ('Fixed', 'Easing'):
+        return settings, 'colour %s' % kind
+    if settings.get(R + 'Color', 'Default') != 'Default':
+        return settings, 'edge colours'
+    width = 1.0
+    if settings.get(R + 'Position', 'Default') == 'Fixed':
+        lo, hi = float(settings.get(R + 'Position_Fixed_L', -0.5)), float(settings.get(R + 'Position_Fixed_R', 0.5))
+        if abs(lo + hi) > 1e-6:
+            return settings, 'off-centre position %g..%g' % (lo, hi)
+        width = hi - lo
+    out = {k: v for k, v in settings.items() if not k.startswith(R)}
+    out['DrawingValues/Type'] = 'Track'
+    for slot in TRACK_COLOUR_SLOTS:
+        p = 'DrawingValues/%s/' % slot
+        out[p + 'Type'] = kind
+        if kind == 'Fixed':
+            out[p + 'Fixed'] = settings.get(R + 'ColorAll_Fixed', [255, 255, 255, 255])
+        else:
+            for k in ('Start', 'End', 'StartSpeed', 'EndSpeed'):
+                if R + 'ColorAll_Easing/' + k in settings:
+                    out[p + 'Easing/' + k] = settings[R + 'ColorAll_Easing/' + k]
+    for part in ('TrackSizeFor', 'TrackSizeMiddle', 'TrackSizeBack'):
+        out['DrawingValues/Track/' + part] = 'Fixed'
+        out['DrawingValues/Track/%s_Fixed' % part] = width
+    out['DrawingValues/Track/SplineDivision'] = settings.get(R + 'SplineDivision', 1)
+    return out, None
+
+
 def scroll(speed_x, speed_y, size_x, size_y):
     """Texture scroll in texture pixels per frame; size = how many texture pixels span the model's UV 0..1."""
     return {'RendererCommonValues/UV': 'Scroll', 'RendererCommonValues/UVScroll/Speed/X': speed_x,

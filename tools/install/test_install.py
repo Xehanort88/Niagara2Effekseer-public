@@ -83,6 +83,21 @@ def main():
     require(r.returncode == 1 and 'animation 3 already plays Edited/Moved/T' in r.stdout, r.stdout + r.stderr)
     passed += 1; print('PASS --id refuses a second animation on the same effect')
 
+    before_display = json.loads((project / 'data/Animations.json').read_text())
+    r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(spec),
+                        '--dest', 'Edited/Group/T', '--name', 'Group T', '--display-type', '1', '--tool', str(a.tool),
+                        '--work', str(work / 'stage-group')], capture_output=True, text=True)
+    group = json.loads((project / 'data/Animations.json').read_text())
+    require(r.returncode == 0 and group[:-1] == before_display and group[-1]['displayType'] == 1
+            and before_display[3]['displayType'] == 0, r.stdout + r.stderr)
+    passed += 1; print('PASS --display-type 1 adds a group animation; default 0 and other entries unchanged')
+    r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(spec),
+                        '--dest', 'Edited/Group/T', '--id', str(group[-1]['id']), '--replace', '--display-type', '2',
+                        '--tool', str(a.tool), '--work', str(work / 'stage-group')], capture_output=True, text=True)
+    changed = json.loads((project / 'data/Animations.json').read_text())
+    require(r.returncode == 0 and changed[:-1] == group[:-1] and changed[-1] == dict(group[-1], displayType=2), r.stdout + r.stderr)
+    passed += 1; print('PASS explicit --display-type on --replace --id changes only the selected animation')
+
     png(src / 'tex/Glow.png', 64)          # regenerated under the same name: the project's copy is now stale
     out = install('--replace', code=1)
     require('a different Glow.png was already beside the output' in out, out)
@@ -98,6 +113,63 @@ def main():
             and not (project / 'effects/Edited/Test/G.efkefc').exists() and (project / 'data/Animations.json').read_bytes() == before,
             'exit %d\n%s%s' % (r.returncode, r.stdout, r.stderr))
     passed += 1; print('PASS a spec whose source effect or resources are gone is refused, each missing file named')
+
+    hdr_dir = project / 'effects/Edited/HDR'
+
+    def put(dest, spec_path, *extra, code=0, name=None):
+        args = ['--name', name or dest] if '--id' not in extra else []
+        r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec',
+                            str(spec_path), '--dest', dest, *args, '--tool', str(a.tool), '--work', str(work / 'stage-hdr'),
+                            *extra], capture_output=True, text=True)
+        require(r.returncode == code, 'exit %d, expected %d:\n%s%s' % (r.returncode, code, r.stdout, r.stderr))
+        return r.stdout
+
+    hspec = src / 'T-hdr.edit.json'
+    hspec.write_text(spec.read_text())
+    before = (project / 'data/Animations.json').read_bytes()
+    out = put('Edited/HDR/T-hdr', hspec, code=2)
+    require('fails it closed without its sidecar' in out and not hdr_dir.exists()
+            and (project / 'data/Animations.json').read_bytes() == before, out)
+    passed += 1; print('PASS an -hdr effect without its sidecar is refused before anything is built')
+
+    good = {'version': 1, 'gradeInput': 'hdr', 'grade': 'vec3 tmOut = hdr / (hdr + vec3(1.0));',
+            'bloom': {'intensity': 0.675, 'sizes': [0.3, 1, 2, 10, 30, 64], 'tints': [0.3465, 0.138, 0.1176, 0.066, 0.066, 0.061],
+                      'radiusScale': 2.4}, 'fallback': 'T-ldr'}
+    side = src / 'T-hdr.hdr.json'
+    side.write_text(json.dumps(good))
+    out = put('Edited/HDR/T-hdr', hspec, code=2)
+    require('fallback twin' in out and 'is not installed' in out and not hdr_dir.exists(), out)
+    passed += 1; print('PASS an HDR install whose graded twin is not installed is refused')
+
+    side.write_text(json.dumps(dict(good, version=2, bloom=dict(good['bloom'], sizes=[1, 2, 3]))))
+    out = put('Edited/HDR/T-hdr', hspec, code=2)
+    require('version must be 1' in out and 'bloom.sizes must be six positive numbers' in out and not hdr_dir.exists(), out)
+    passed += 1; print('PASS a sidecar breaking the engine contract is refused, each problem named')
+
+    lspec = src / 'T-ldr.edit.json'
+    lspec.write_text(spec.read_text())
+    put('Edited/HDR/T-ldr', lspec)
+    side.write_text(json.dumps(dict(good, fallback='Wrong')))
+    out = put('Edited/HDR/T-hdr', hspec, '--hdr-fallback', 'T-ldr')
+    written = json.loads((hdr_dir / 'T-hdr.hdr.json').read_text(encoding='utf-8'))
+    require('HDR sidecar written' in out and written == good and (hdr_dir / 'T-hdr.efkefc').exists()
+            and not (hdr_dir / 'T-ldr.hdr.json').exists(), out)
+    passed += 1; print('PASS an HDR install writes the checked sidecar beside it; --hdr-fallback names the twin')
+
+    out = put('Edited/HDR/T-hdr', hspec, '--replace', '--hdr-fallback', 'T-hdr', code=2)
+    require('names this effect itself' in out, out)
+    side.write_text(json.dumps(dict(good, fallback='T-hdr2')))
+    (hdr_dir / 'T-hdr2.efkefc').write_bytes((hdr_dir / 'T-hdr.efkefc').read_bytes())
+    (hdr_dir / 'T-hdr2.hdr.json').write_text(json.dumps(good))
+    out = put('Edited/HDR/T-hdr', hspec, '--replace', code=2)
+    require('has its own sidecar' in out, out)
+    passed += 1; print('PASS a fallback that is the effect itself or another HDR effect is refused')
+
+    side.write_text(json.dumps(good))
+    put('Edited/HDR/Glow', lspec, '--hdr', str(side))
+    out = put('Edited/HDR/Glow', lspec, '--replace', code=2)
+    require('is left from an HDR install of this name' in out, out)
+    passed += 1; print('PASS a non-HDR reinstall over a leftover sidecar is refused')
     print('RESULT: %d passed, 0 failed' % passed)
 
 

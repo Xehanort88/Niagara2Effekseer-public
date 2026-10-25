@@ -232,6 +232,23 @@ class Checks(unittest.TestCase):
         with self.assertRaisesRegex(m.ImportErrorDetail,'Scale must be positive'):
             m.run(m.parser().parse_args([str(WORK/'origin.glb'),'--out',str(WORK/'origin-bad'),'--size','8','--scale','0']))
 
+    def test_uv2_centre_v6(self):
+        # (1,0,0) m and (0,1,0) m at --scale 2.5: Unreal x 100 cm, and glb y = Unreal z 100 cm; 40 cm per unit
+        report = m.run(m.parser().parse_args([str(write_glb(WORK/'uv2.glb')),'--out',str(WORK/'uv2-result'),
+                                              '--size','8','--keep-origin','--scale','2.5','--uv2-centre','40']))
+        data = (WORK/'uv2-result/Model/uv2.efkmodel').read_bytes()
+        rows,faces = m.parse_model_v6(data)
+        self.assertEqual(report['models']['uv2']['version'],6)
+        self.assertEqual(struct.unpack_from('<4i',data),(6,1,1,1))
+        uv2 = {tuple(round(x,4) for x in r[:3]):(round(r[14],3),round(r[15],3)) for r in rows}
+        self.assertEqual(uv2[(2.5,0,0)],(100.0,0.0))
+        self.assertEqual(uv2[(0,2.5,0)],(0.0,100.0))
+        self.assertEqual(uv2[(0,0,0)],(0.0,0.0))
+        self.assertEqual([r[12:14] for r in rows],[r[12:14] for r in m.parse_model((WORK/'origin-result/Model/origin.efkmodel').read_bytes())[0]]
+                         if (WORK/'origin-result/Model/origin.efkmodel').exists() else [r[12:14] for r in rows])
+        with self.assertRaisesRegex(m.ImportErrorDetail,'must be positive'):
+            m.run(m.parser().parse_args([str(WORK/'uv2.glb'),'--out',str(WORK/'uv2-bad'),'--size','8','--uv2-centre','0']))
+
     def test_missing_map_refused(self):
         args = m.parser().parse_args([str(write_glb(WORK/'missing.glb')),'--out',str(WORK/'missing-out'),'--color',str(WORK/'absent.png'),'--size','8'])
         with self.assertRaisesRegex(m.ImportErrorDetail,'Missing explicitly requested map'): m.run(args)
