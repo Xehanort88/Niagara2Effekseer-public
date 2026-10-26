@@ -156,6 +156,21 @@ def build_variant(m, task, variant, env, results):
     nb = sum(len(s['builds']) for s in m['systems'])
     if nb == 1:
         final = work / 'build' / (m['systems'][0]['builds'][0]['name'] + '.efkefc')
+        # Pair names also apply to standalone builds, without adding hosts that
+        # would change their nodes, random sequence or standalone clock.
+        template = (m.get('combine') or {}).get('name')
+        if template and final.is_file():
+            named = final.with_name(template.replace('{variant}', variant) + '.efkefc')
+            if named != final:
+                shutil.copy2(final, named)
+                source_spec = final.with_suffix('.edit.json')
+                if source_spec.is_file():
+                    spec = json.loads(source_spec.read_text(encoding='utf-8'))
+                    spec['name'] = named.stem
+                    named.with_suffix('.edit.json').write_text(json.dumps(spec, indent=1), encoding='utf-8')
+                final = named
+                lines.append('FINAL PASS %s: byte-identical standalone build' % final.stem)
+                log('  ' + lines[-1])
     else:
         blank = work / 'blank.efkefc'
         if not blank.is_file():

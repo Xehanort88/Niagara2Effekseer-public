@@ -89,7 +89,7 @@ def host_index(m):
 
 def final_effect(m, work, variant):
     nb = sum(len(s['builds']) for s in m['systems'])
-    if nb > 1:
+    if nb > 1 or (m.get('combine') or {}).get('name'):
         return Path(work) / 'build' / (m['combine']['name'].replace('{variant}', variant) + '.efkefc')
     return Path(work) / 'build' / (m['systems'][0]['builds'][0]['name'] + '.efkefc')
 

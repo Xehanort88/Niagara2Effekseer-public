@@ -172,6 +172,8 @@ def hdr_sidecar(path, fallback):
             bad.append('bloom.intensity must be a number >= 0')
         if not (num(b.get('radiusScale', 1)) and b.get('radiusScale', 1) > 0):
             bad.append('bloom.radiusScale must be a number > 0')
+        if 'threshold' in b and not num(b['threshold']):
+            bad.append('bloom.threshold must be a finite number')
         for k, ok in (('sizes', lambda v: v > 0), ('tints', lambda v: v >= 0)):
             v = b.get(k)
             if v is not None and not (isinstance(v, list) and len(v) == 6 and all(num(x) and ok(x) for x in v)):
