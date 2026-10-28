@@ -55,11 +55,66 @@
     EffectManager.onError = function (url) { if (P.loads[url]) P.loads[url].err = true; return oe.apply(this, arguments); };
     const ue = SceneManager.updateEffekseer;
     SceneManager.updateEffekseer = function () { const t = performance.now(); ue.call(this); P.updMs += performance.now() - t; };
+    // Wrappers keep the context they are called on: since runtime 20261027.3 the engine steps the in-scene
+    // context with the overlay's own update (SceneLayer.update(Graphics.effekseer.update), called on the scene's
+    // context). A wrapper bound to the overlay stepped the overlay instead, so in-scene effects never advanced or
+    // ended and every run reported "did not end".
     const ctx = Graphics.effekseer, gl = Graphics._effekseerGL;
-    const dh = ctx.drawHandle.bind(ctx);
-    ctx.drawHandle = function (h) { if (P.finish) gl.finish(); const t = performance.now(); dh(h); if (P.finish) gl.finish(); P.renderMs += performance.now() - t; };
-    const up = ctx.update.bind(ctx);
-    ctx.update = function (d) { up(d); if (ctx.getRestInstancesCount) P.peakLive = Math.max(P.peakLive, 32000 - ctx.getRestInstancesCount()); };
+    const dh = ctx.drawHandle;
+    ctx.drawHandle = function (h) { if (P.finish) gl.finish(); const t = performance.now(); dh.call(this, h); if (P.finish) gl.finish(); P.renderMs += performance.now() - t; };
+    const up = ctx.update;
+    // Live instances per context: its free count when idle (the most seen) minus the fewest free during the play;
+    // the overlay's pool and the in-scene context's differ in size.
+    const pools = new Map();
+    ctx.update = function (d) {
+      up.call(this, d);
+      if (!this.getRestInstancesCount) return;
+      const rest = this.getRestInstancesCount();
+      let st = pools.get(this);
+      if (!st) { st = { most: rest }; pools.set(this, st); }
+      st.most = Math.max(st.most, rest);
+      P.peakLive = Math.max(P.peakLive, st.most - rest);
+    };
+    hookSceneLayer();
+  }
+
+  // Screen animations drawn inside PIXI's scene (Sprite_Animation.SceneLayer, runtime 20261027.3+): they load in the
+  // layer's own Effekseer context (not through EffectManager) and draw from a RenderContainer during PIXI's render.
+  const sceneLayer = () => (window.Sprite_Animation && Sprite_Animation.SceneLayer) || null;
+  const inScene = () => { const L = sceneLayer(); return !!(L && L.active && L.active()); };
+  function hookSceneLayer() {
+    const L = sceneLayer();
+    if (!L) return;
+    const ec = L.ensureContext;
+    L.ensureContext = function () {
+      const c = ec.call(this);
+      if (c && !c.__ingameHooked) {
+        c.__ingameHooked = true;
+        const le = c.loadEffect;
+        c.loadEffect = function (url, scale, onload, onerror) {
+          P.loads[url] = { t0: performance.now() };
+          return le.call(this, url, scale,
+            function () { if (P.loads[url]) P.loads[url].t1 = performance.now(); if (onload) return onload.apply(this, arguments); },
+            function () { if (P.loads[url]) P.loads[url].err = true; if (onerror) return onerror.apply(this, arguments); });
+        };
+      }
+      return c;
+    };
+    for (const name of ['draw', 'drawHdr']) {
+      const f = L[name];
+      if (typeof f !== 'function') continue;
+      L[name] = function (renderer) {
+        const g = renderer && renderer.gl;
+        if (P.finish && g) g.finish();
+        const t = performance.now();
+        try { return f.apply(this, arguments); } finally { if (P.finish && g) g.finish(); P.renderMs += performance.now() - t; }
+      };
+    }
+  }
+  // An effect's cache entry on the path the game plays it on now.
+  function cacheEntry(effectName) {
+    if (inScene()) return sceneLayer().cache.get(effectName) || null;
+    return EffectManager._cache[EffectManager.makeUrl(effectName)] || null;
   }
 
   // Mean colour of the rendered battle scene before the animation: a run whose
@@ -93,11 +148,12 @@
     P.finish = finish; P.peakLive = 0; P.longTasks.length = 0;
     const anim = $dataAnimations[id];
     const url = EffectManager.makeUrl(anim.effectName);
-    const cached = !!EffectManager._cache[url];
+    const entry = cacheEntry(anim.effectName);
+    const cached = !!entry;
     // Fully loaded before the request (preloaded): the cast a player sees when
     // plugins/ReactorEffectPreload.js covers it. cachedBefore alone is also true
     // for a load still in progress.
-    const loaded = cached && !!EffectManager._cache[url].isLoaded;
+    const loaded = cached && !!entry.isLoaded;
     const ss = SceneManager._scene._spriteset;
     const frames = []; let started = null, ended = null, stalled = false;
     const tReq = performance.now();
@@ -152,10 +208,15 @@
     const anim = $dataAnimations[id];
     const ss = SceneManager._scene._spriteset;
     const gl = Graphics._effekseerGL;
-    const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
+    // In the scene the game's own canvas holds the finished frame (read through a 2D canvas in the render's task,
+    // no GL state touched); on the overlay path the overlay's buffer holds the composited frame.
+    const scene = inScene();
+    const W = scene ? Graphics._canvas.width : gl.drawingBufferWidth, H = scene ? Graphics._canvas.height : gl.drawingBufferHeight;
     const full = new Uint8Array(W * H * 4);
     const comp = document.createElement('canvas'); comp.width = 640; comp.height = 360;
     const c2 = comp.getContext('2d');
+    const half = document.createElement('canvas'); half.width = W >> 1; half.height = H >> 1;
+    const h2 = half.getContext('2d', { willReadFrequently: true });
     let startGf = null, done = false, lastF = -1;
     const sends = [];
     const ra = Sprite_Animation.renderActive;
@@ -168,18 +229,26 @@
       const f = Graphics.frameCount - startGf;
       if (f !== lastF && f % step === 0) {
         lastF = f;
-        // While an effect plays, the overlay holds the whole composited frame.
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, full);
-        const w = W >> 1, h = H >> 1, out = new Uint8Array(w * h * 4);
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++) {
-          const i = ((2 * y) * W + 2 * x) * 4 + c;
-          out[((h - 1 - y) * w + x) * 4 + c] = (full[i] + full[i + 4] + full[i + W * 4] + full[i + W * 4 + 4] + 2) >> 2;
+        const w = W >> 1, h = H >> 1;
+        let out;
+        if (scene) {
+          h2.imageSmoothingEnabled = true; h2.imageSmoothingQuality = 'high';
+          h2.drawImage(Graphics._canvas, 0, 0, w, h);
+          out = new Uint8Array(h2.getImageData(0, 0, w, h).data.buffer);
+        } else {
+          // While an effect plays, the overlay holds the whole composited frame.
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, full);
+          out = new Uint8Array(w * h * 4);
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++) {
+            const i = ((2 * y) * W + 2 * x) * 4 + c;
+            out[((h - 1 - y) * w + x) * 4 + c] = (full[i] + full[i + 4] + full[i + W * 4] + full[i + W * 4 + 4] + 2) >> 2;
+          }
         }
         sends.push(fetch('/__frame', { method: 'POST', headers: { 'x-frame': String(f) }, body: out }));
         if (shots && f % shots === 0) {
           c2.drawImage(Graphics._canvas, 0, 0, 640, 360);
-          c2.drawImage(Graphics._effekseerCanvas, 0, 0, 640, 360);
+          if (!scene) c2.drawImage(Graphics._effekseerCanvas, 0, 0, 640, 360);
           sends.push(fetch('/__shot', { method: 'POST', headers: { 'x-frame': String(f) }, body: comp.toDataURL('image/jpeg', 0.9) }));
         }
       }
@@ -210,6 +279,8 @@
       if (!window.ReactorEffectPreload || !ReactorEffectPreload.params) throw new Error('--preload-id: the project does not run plugins/ReactorEffectPreload.js (window.ReactorEffectPreload missing)');
       if (!ReactorEffectPreload.params.extraIds.includes(ID)) ReactorEffectPreload.params.extraIds.push(ID);
     }
+    // run.js --overlay: the engine's overlay canvas instead of PIXI's scene (its fallback path).
+    if (job.overlay) Graphics.effekseerInScene = false;
     if (job.prepare) (0, eval)(job.prepare);
     BattleManager.setup(job.troop || 1, true, false);
     const tGoto = performance.now();
@@ -228,11 +299,11 @@
       warmup = await probe(warmupId, { maxFrames: 3000 }); await sleep(500);
     }
     const backdrop = await grabSceneMean();
-    const common = { id: ID, preloadId: !!job.preloadId, renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
+    const common = { id: ID, preloadId: !!job.preloadId, effekseerPath: inScene() ? 'scene' : 'overlay', renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
     if (job.mode === 'capture') {
-      const url = EffectManager.makeUrl(anim.effectName);
-      EffectManager.load(anim.effectName);
-      for (let i = 0; i < 1200 && !(EffectManager._cache[url] && EffectManager._cache[url].isLoaded); i++) await sleep(50);
+      // Loaded before the capture starts, on the path the animation will play on.
+      if (inScene()) sceneLayer().load(anim.effectName); else EffectManager.load(anim.effectName);
+      for (let i = 0; i < 1200 && !(cacheEntry(anim.effectName) && cacheEntry(anim.effectName).isLoaded); i++) await sleep(50);
       const cap = await capture(ID, job.step || 1, job.shots || 0);
       postWithConsole({ ...common, capture: cap, errors: EffectManager._errorUrls.slice(), engineErrors: P.engineErrors });
       return;

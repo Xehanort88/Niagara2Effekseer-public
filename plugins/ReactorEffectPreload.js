@@ -54,7 +54,8 @@
  * This plugin starts those loads when the battle scene is created. The scene
  * already waits for every effect in the cache before it starts, so the cost is
  * paid behind the battle transition instead. Effects stay cached until the next
- * map transfer clears them, so later battles on the same map start at once.
+ * map transfer clears them (on the overlay; see below), so later battles on the
+ * same map start at once.
  *
  * Only animations with an Effekseer effect are loaded (sheet animations are
  * skipped). Each file is checked first, because the Effekseer web runtime never
@@ -63,6 +64,12 @@
  * it does without this plugin.
  * Effects drawn inside a 3D battle room load through their own path and are not
  * preloaded.
+ *
+ * On RPG Reactor runtime 20261027.3 or later, screen animations play inside the
+ * battle scene in their own Effekseer context; the effects load there (the
+ * engine's in-scene layer), where the cast looks for them. Earlier runtimes, and
+ * a project with Graphics.effekseerInScene = false, load into the overlay as
+ * before. Effects in the in-scene layer stay loaded for the whole session.
  *
  * No commands. Measured with tools/ingame in Niagara2Effseeker (README).
  */
@@ -146,7 +153,26 @@
         xhr.send(null);
     }
 
+    // Since RPG Reactor runtime 20261027.3 screen animations play inside PIXI's
+    // scene, in their own Effekseer context (Sprite_Animation.SceneLayer), and
+    // never read EffectManager._cache: preload there while that path is in use.
+    function sceneLayer() {
+        return typeof EffectManager.sceneLayer === "function" ? EffectManager.sceneLayer() : null;
+    }
+
+    function isCached(name, url) {
+        const layer = sceneLayer();
+        return layer ? layer.cache.has(name) : !!EffectManager._cache[url];
+    }
+
     function startLoad(record, name, url) {
+        const layer = sceneLayer();
+        if (layer) {
+            // The layer gives a load it lets go of after EffectManager.PRELOAD_WAIT_MS
+            // to Scene_Base.isReady, as the engine's own map preload does.
+            if (layer.preload(name)) record.requested.push(name);
+            return;
+        }
         if (EffectManager._cache[url]) return;
         // Our own load, so a failure is not queued as a game error: the
         // effect is dropped from the cache and the battle carries on.
@@ -168,7 +194,7 @@
             const name = animation && animation.effectName;
             if (!name) continue;
             const url = EffectManager.makeUrl(name);
-            if (EffectManager._cache[url]) continue;
+            if (isCached(name, url)) continue;
             record.checking++;
             fileExists(url, (exists) => {
                 record.checking--;

@@ -378,6 +378,32 @@ if (opts.project && !opts.noChrome) {
     const { lines } = runjs('live-preload-missing', P, ['--ids', ID, '--preload-id', '--override', `/js/plugins/ReactorEffectPreload.js=${empty}`], 1);
     assert.match(lines[0].failures.join(), /page error: .*--preload-id: the project does not run plugins\/ReactorEffectPreload.js/);
   });
+  // Runtime 20261027.3+ plays screen animations inside PIXI's scene (Sprite_Animation.SceneLayer). The tool used to
+  // step the overlay context whenever the engine stepped the scene's (a wrapper bound to the overlay), so no effect
+  // ever ended, and it read loads, draws and frames from the overlay only: every run failed with black captures.
+  const sceneRuntime = fs.readdirSync(path.join(P, 'js')).some((f) => f.endsWith('.js') &&
+    fs.readFileSync(path.join(P, 'js', f), 'utf8').includes('Sprite_Animation.SceneLayer = {'));
+  if (sceneRuntime) {
+    test('live_in_scene_path_measured', () => {
+      const { lines } = runjs('live-scene', P, ['--ids', ID, '--warmup', '0'], 0);
+      const r = lines[0], c = r.cold;
+      assert.deepStrictEqual([r.status, r.effekseerPath, c.ended], ['ok', 'scene', true], r.failures.join());
+      assert.ok(c.loadMs > 0 && c.drawMs.max > 0 && c.peakLiveInstances > 0, JSON.stringify(c));
+    });
+    test('live_overlay_flag_plays_on_the_overlay', () => {
+      const { lines } = runjs('live-overlay', P, ['--ids', ID, '--overlay'], 0);
+      assert.deepStrictEqual([lines[0].tag, lines[0].status, lines[0].effekseerPath, lines[0].cold.ended], [`time-${ID}-ovl`, 'ok', 'overlay', true]);
+    });
+    test('live_in_scene_capture_not_black', () => {
+      const out = path.join(WORK, 'run', 'live-scene-cap');
+      const { lines } = runjs('live-scene-cap', P, ['--ids', ID, '--mode', 'capture', '--step', '5'], 0);
+      assert.strictEqual(lines[0].effekseerPath, 'scene');
+      const frames = fs.readdirSync(path.join(out, `capture-${ID}`)).filter((f) => f.endsWith('.rgba'));
+      const buf = fs.readFileSync(path.join(out, `capture-${ID}`, frames[Math.floor(frames.length / 2)]));
+      let sum = 0; for (let i = 0; i < buf.length; i += 4) sum += buf[i] + buf[i + 1] + buf[i + 2];
+      assert.ok(sum / (buf.length / 4) / 3 > 8, `mid capture frame mean ${(sum / (buf.length / 4) / 3).toFixed(1)}: black`);
+    });
+  }
   test('live_capture_rerun_over_stale_frames', () => {
     const out = path.join(WORK, 'run', 'live-cap');
     fs.mkdirSync(path.join(out, `capture-${ID}-1`), { recursive: true });

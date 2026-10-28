@@ -30,6 +30,14 @@
 //                          use) and the freeze is an uncovered cast. Tags get
 //                          -pre. The job fails if the plugin is missing or the
 //                          effect was not loaded before the cold play.
+//   --overlay              (no value) play on the engine's overlay canvas
+//                          (Graphics.effekseerInScene = false) instead of inside
+//                          PIXI's scene. Since runtime 20261027.3 the game draws
+//                          screen animations in its scene: under the windows,
+//                          inside the spriteset's colour filters. The overlay is
+//                          the engine's fallback, so this measures the older
+//                          path. Tags get -ovl. Each result records the path it
+//                          played on (effekseerPath: scene | overlay).
 //   --headed               show Chrome for real GPU performance measurements
 //   --port N               default 8901; pick one nobody else is using
 //   --chrome <path>        default C:/Program Files/Google/Chrome/Application/chrome.exe
@@ -42,7 +50,7 @@
 //                          240, 260 for a default time-mode job
 //
 // Jobs file: [{ "tag": "...", "id": 317, "mode": "time", "map": {}, "sub": {},
-//              "override": {}, "prepare": "...", "preloadId": false, "warmup": 1, "troop": 1, "step": 1, "shots": 0,
+//              "override": {}, "prepare": "...", "preloadId": false, "overlay": false, "warmup": 1, "troop": 1, "step": 1, "shots": 0,
 //              "maxFrames": 3000, "captureSeconds": 120, "timeout": 240 }]
 // Output: <out>/results.jsonl (one line per job) and <out>/<tag>/ for captures.
 // A capture job first deletes the frame files (f###.rgba, shot-f###.jpg) an
@@ -59,7 +67,7 @@ const { verdict } = require('./verdict');
 
 const argv = process.argv.slice(2);
 const opts = { multi: { map: [], sub: [], override: [] } };
-const FLAGS = ['preload-id', 'headed'];
+const FLAGS = ['preload-id', 'headed', 'overlay'];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (!a.startsWith('--')) throw new Error('unexpected argument ' + a);
@@ -80,7 +88,7 @@ const pairs = (list) => Object.fromEntries(list.map((s) => { const i = s.indexOf
 const cliShared = {
   mode: opts.mode || 'time', step: opts.step ? +opts.step : undefined, shots: opts.shots ? +opts.shots : undefined,
   warmup: opts.warmup !== undefined ? +opts.warmup : undefined, troop: opts.troop ? +opts.troop : undefined,
-  prepare: opts.prepare, preloadId: !!opts['preload-id'], map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
+  prepare: opts.prepare, preloadId: !!opts['preload-id'], overlay: !!opts.overlay, map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
   maxFrames: opts['max-frames'] ? +opts['max-frames'] : undefined,
   captureSeconds: opts['capture-seconds'] ? +opts['capture-seconds'] : undefined,
   timeout: opts.timeout ? +opts.timeout : undefined,
@@ -94,7 +102,7 @@ else {
   const ids = need('ids').split(',').map(Number);
   const repeat = +(opts.repeat || 1);
   jobs = [];
-  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (cliShared.preloadId ? '-pre' : '') + (repeat > 1 ? `-${k}` : ''), id });
+  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (cliShared.preloadId ? '-pre' : '') + (cliShared.overlay ? '-ovl' : '') + (repeat > 1 ? `-${k}` : ''), id });
   jobs = jobs.map((j) => ({ ...cliShared, ...j }));
 }
 jobs.forEach((j, n) => { if (!j.tag) j.tag = `job${n}-${j.id}`; if (!j.mode) j.mode = 'time'; });
