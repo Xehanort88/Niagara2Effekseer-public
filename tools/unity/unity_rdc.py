@@ -256,6 +256,56 @@ def flipped(m, r):
     return True, 'assumed: no _ProjectionParams'
 
 
+def time_row(raw):
+    """t of the first constant-buffer row shaped like Unity's _Time (t/20, t, 2t, 3t), else None. WotR's and Rogue
+    Trader's shaders keep no names, but the row keeps its shape. Both games put a second clock of the same shape a few
+    rows after it (WotR 4 rows, ~21 s ahead; RT 5 rows, ~27 s ahead): the first is _Time, as WotR's a Unity study effect
+    showed (its 0.502 s between captures 3465 and 3491 fits the sigil's 10 deg/s turn; the second clock's 1.396 s
+    does not), so later rows never count."""
+    n = len(raw) // 16
+    a = np.frombuffer(raw[:n * 16], '<f4').reshape(-1, 4).astype(float)
+    for r in a:
+        t = r[1]
+        if not np.isfinite(r).all() or t <= 0.01:
+            continue
+        tol = 1e-5 * t + 1e-6
+        if abs(r[0] * 20 - t) < 20 * tol and abs(r[2] - 2 * t) < 2 * tol and abs(r[3] - 3 * t) < 3 * tol:
+            return float(t)
+    return None
+
+
+def unity_clock(m, rs):
+    """The game clock the effect drew at: Unity's _Time.y in the constants of the kept draws rs, by name when the
+    shaders kept reflection, else by the row's shape. The value most draws read wins and the others are listed (WotR's
+    HUD draws read a stale 48.95 s; they are UI and not passed in). Capture names count rendered frames, not 60 fps
+    frames, so frame gaps between captures say nothing about time without this (WotR ran ~51 fps)."""
+    seen = {}
+    for r in rs:
+        found = None
+        for st in ('vs', 'ps'):
+            for cb in r.get('shaders', {}).get(st, {}).get('cbuffers', []):
+                for k, v in flatten(m['tables']['cbvars'].get(cb.get('vars') or '') or {}):
+                    if k.split('.')[-1] == '_Time' and isinstance(v, list) and len(v) > 1:
+                        found = found or (float(v[1]), 'named')
+                if not found and cb.get('data') in m['tables']['cbdata']:
+                    t = time_row(bytes.fromhex(m['tables']['cbdata'][cb['data']]))
+                    found = (t, 'shape') if t is not None else None
+        if found:
+            s = seen.setdefault(round(found[0], 5), {'draws': 0, 'eids': [r['eid'], r['eid']], 'how': found[1]})
+            s['draws'] += 1
+            s['eids'][1] = r['eid']
+    if not seen:
+        return None
+    best = max(seen, key=lambda t: seen[t]['draws'])
+    return dict(time=best, **seen[best], others=[dict(time=t, **v) for t, v in sorted(seen.items()) if t != best])
+
+
+def frame_number(cid):
+    """RenderDoc names a capture <exe>_frame<N> by the rendered frame it took: N, else None."""
+    f = re.search(r'frame(\d+)$', cid)
+    return int(f.group(1)) if f else None
+
+
 def export_texture(d, s, work, done, flip):
     """A static texture as textures/<hash>.png (+ _alpha.png when its alpha is not flat), once per hash. Unity on D3D
     uploads imported textures bottom row first (its UV v = 0 is the image's bottom), so flip turns them upright."""
@@ -571,7 +621,8 @@ def analyse_capture(d, cid, work, done, flip, ui_re=UI_TEX):
            'scene_draws': sum(len(x['eids']) for x in layers if x['kind'] != 'ui'),
            'ui_draws': sum(len(x['eids']) for x in layers if x['kind'] == 'ui'),
            'main_target': {k: mt.get(k) for k in ('id', 'name', 'format', 'size')} if mt else None,
-           'side_targets': list(side.values()), 'layers': layers}
+           'side_targets': list(side.values()), 'layers': layers,
+           'clock': unity_clock(m, [r for r in scene if r['eid'] not in ui])}
     up = sum(dr['flipped'] for ly in layers if ly['kind'] == 'scene' for dr in ly['draws'])
     path, note = upright_final(store, cid, m, main, flip and up * 2 >= max(1, sum(
         len(ly['draws']) for ly in layers if ly['kind'] == 'scene')), work)
@@ -609,6 +660,7 @@ def write_report(work, src, store, cmd, videos, caps, top, flip):
             v['video'], v.get('fps'), v.get('seconds'), v.get('count'), v['frames'],
             '; sheet ![](%s)' % v['sheet'] if v.get('sheet') else '', '; ERROR ' + v['error'] if v.get('error') else ''))
     L.append('')
+    L += clock_md(caps)
     for cap in caps:
         c = cap['counts'] or {}
         mt = cap.get('main_target') or {}
@@ -670,6 +722,41 @@ def write_report(work, src, store, cmd, videos, caps, top, flip):
           '- Screen sizes are bounding boxes of each quad on screen, so rotated quads read larger; compare build and '
           'game with scale-free measures, since their cameras differ.', '']
     (work / 'REPORT.md').write_text('\n'.join(L), encoding='utf-8')
+
+
+def clock_md(caps):
+    """The Capture clock section: each capture's _Time.y, its time after the first, the 60 fps frame that is, and the
+    game's frame rate between captures from their frame numbers."""
+    timed = sorted((c for c in caps if c.get('clock')), key=lambda c: c['clock']['time'])
+    L = ['## Capture clock', '']
+    if not timed:
+        return L + ['No capture holds Unity\'s `_Time` (by name or by its (t/20, t, 2t, 3t) row): place captures by '
+                    'their frame numbers only with the game\'s frame rate in hand.', '']
+    t0 = timed[0]['clock']['time']
+    L += ['Unity\'s `_Time.y` that the kept scene draws read (by name, or as the first constant row shaped (t/20, t, 2t, 3t): '
+          'WotR and Unity game B keep a second clock of that shape a few rows later). A capture\'s frame number counts rendered frames, so the gap between two captures '
+          'is time only at the game\'s real frame rate: place a build\'s frames by `_Time`, '
+          '`frame = (t - t0) x 60` from a capture whose build frame is known, and start a scrolling texture\'s phase '
+          'at the game\'s `_Time` (rate x t).', '',
+          '| capture | `_Time.y` | read by draws (eids) | after the first, s | at 60 fps, frames | game fps since the last |',
+          '|---|---:|---|---:|---:|---:|']
+    prev = None
+    for c in timed:
+        k = c['clock']
+        n = frame_number(c['id'])
+        fps = ''
+        if prev and n is not None and prev[1] is not None and k['time'] > prev[0]:
+            fps = '%.1f' % ((n - prev[1]) / (k['time'] - prev[0]))
+        L.append('| `%s` | %.5f | %d (%d-%d, %s) | %.3f | %.1f | %s |' % (
+            c['id'], k['time'], k['draws'], k['eids'][0], k['eids'][1], k['how'], k['time'] - t0,
+            (k['time'] - t0) * 60, fps))
+        prev = (k['time'], n)
+    others = ['`%s`: %s' % (c['id'], ', '.join('%.5f (%d draws, eid %d-%d)' % (o['time'], o['draws'], *o['eids'])
+                                              for o in c['clock']['others'])) for c in timed if c['clock']['others']]
+    if others:
+        L += ['', 'Other `_Time` values read by fewer kept draws (another camera, or a draw left from an earlier '
+              'frame): ' + '; '.join(others) + '.']
+    return L + ['']
 
 
 def eids(es):

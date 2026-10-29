@@ -137,6 +137,7 @@ class Unchanged(unittest.TestCase):
             a = json.loads((old / 'manifest.json').read_text(encoding='utf8'))
             b = json.loads((new / 'manifest.json').read_text(encoding='utf8'))
             self.assertEqual(b.pop('characterCoverage')['method'], 'cmap')
+            a.pop('characterCoverage', None)  # HEAD writes it too since 3547eaf; the sheets and the rest must match
             self.assertEqual(a, b, fit)
 
 

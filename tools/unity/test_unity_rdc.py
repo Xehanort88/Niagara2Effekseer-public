@@ -14,6 +14,8 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / 'tools' / 'rdcdigest'))
 import ddsio  # noqa: E402
+sys.path.insert(0, str(HERE))
+from unity_rdc import find_ffmpeg  # noqa: E402
 
 FAILS = []
 
@@ -142,7 +144,7 @@ def main():
             shutil.rmtree(p)
     folder.mkdir(parents=True)
     build(folder)
-    ffmpeg = shutil.which('ffmpeg')
+    ffmpeg = find_ffmpeg(None)                # the tool's own lookup: PATH, the repo's imageio_ffmpeg copy, the package
     if ffmpeg:
         subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
                         'testsrc=size=160x90:rate=30:duration=3', str(folder / 'footage.mp4')], check=True)
@@ -210,6 +212,29 @@ def main():
     check('one mesh stays one', unity_rdc.copy_rows(np.array([0, 1, 2, 0, 2, 3, 0, 3, 4])) is None)
     check('a strip sharing vertices is not copies', unity_rdc.copy_rows(np.concatenate([tri, tri + 2, tri + 4])) is None)
 
+    # the capture clock: Unity's _Time by name, else the first (t/20, t, 2t, 3t) row (WotR/RT keep no names and put a
+    # second clock of that shape a few rows later)
+    k = cap['clock']
+    check('clock by name from the kept non-UI draws', k and k['time'] == 2.0 and k['how'] == 'named' and
+          k['draws'] == 3 and k['eids'] == [10, 16], k)
+    trow = lambda t: np.array([t / 20, t, 2 * t, 3 * t], '<f4').tobytes()
+    zero = bytes(16)
+    check('first _Time-shaped row wins', unity_rdc.time_row(zero + trow(50.4445) + zero + trow(71.776)) ==
+          float(np.float32(50.4445)))
+    check('no _Time row', unity_rdc.time_row(np.array([1, 2, 3, 4, 0.1, 2, 4, 7], '<f4').tobytes()) is None)
+    mm = {'tables': {'cbvars': {}, 'cbdata': {'a': (zero + trow(52.0)).hex(), 'b': trow(48.9).hex()}}}
+    rows = [{'eid': e, 'shaders': {'ps': {'cbuffers': [{'register': 0, 'data': key}]}}}
+            for e, key in ((5, 'a'), (6, 'b'), (7, 'a'), (8, 'a'))]
+    kk = unity_rdc.unity_clock(mm, rows)
+    check('clock by shape: most draws win, the stale one listed', kk['how'] == 'shape' and kk['draws'] == 3 and
+          kk['eids'] == [5, 8] and round(kk['time'], 3) == 52.0 and [round(o['time'], 2) for o in kk['others']] ==
+          [48.9] and kk['others'][0]['eids'] == [6, 6], kk)
+    md = '\n'.join(unity_rdc.clock_md([{'id': 'Game_frame3491', 'clock': dict(kk, time=50.9, others=[])},
+                                       {'id': 'Game_frame3465', 'clock': dict(kk, time=50.4, others=[])}]))
+    check('clock table: sorted by time, 60 fps frames and the game\'s fps between captures',
+          md.index('frame3465') < md.index('frame3491') and '| 0.500 | 30.0 | 52.0 |' in md, md)
+    check('report has the clock section', '## Capture clock' in rep and '| `breath1` | 2.00000 |' in rep)
+
     # a black final.png (an undrawn swap buffer): the scene target after its last kept draw stands in, turned upright
     Image.new('RGB', (8, 8), (0, 0, 0)).save(folder / 'rdcdigest/captures/breath1/final.png')
     (folder / 'rdcdigest/captures/breath1/rt').mkdir()
@@ -228,8 +253,9 @@ def main():
         f = data['footage'][0]
         check('footage 1 fps frames named by second', f['fps'] == 30.0 and f['count'] == 3 and
               (folder / 'frames-1fps-footage' / '0000.png').exists() and (out / f['sheet']).exists(), f)
-    else:
-        print('SKIP: footage (no ffmpeg on PATH)')
+    else:                                     # a skip here passed as '0 failure(s)' (AGENTS.md: a SKIP is a failure)
+        check('footage: an ffmpeg to test with', False, 'none on PATH, in out/edits/*/scratch/pylib/imageio_ffmpeg, '
+              'or from the imageio-ffmpeg package (pip install imageio-ffmpeg)')
     r = subprocess.run([sys.executable, script, str(folder), '--work', str(out), '--skip-digest'],
                        capture_output=True, text=True)
     check('refuses an existing work folder', r.returncode != 0 and 'already exists' in r.stderr, r.stderr)

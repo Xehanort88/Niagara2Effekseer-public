@@ -170,6 +170,50 @@ def main():
     out = put('Edited/HDR/Glow', lspec, '--replace', code=2)
     require('is left from an HDR install of this name' in out, out)
     passed += 1; print('PASS a non-HDR reinstall over a leftover sidecar is refused')
+
+    # retire.py: blank the slots in place, move the effect (and its HDR sidecar) out, refuse ids the database uses, undo
+    def retire(*extra, code=0):
+        r = subprocess.run([sys.executable, str(ROOT / 'tools/install/retire.py'), '--project', str(project), *extra],
+                           capture_output=True, text=True)
+        require(r.returncode == code, 'retire exit %d, expected %d:\n%s%s' % (r.returncode, code, r.stdout, r.stderr))
+        return r.stdout
+    anim_file = project / 'data/Animations.json'
+    before = anim_file.read_bytes()
+    ids = {e['effectName']: e['id'] for e in json.loads(before) if e}
+    moved_id, hdr_id = ids['Edited/Moved/T'], ids['Edited/HDR/T-hdr']
+    archive = work / 'retired'
+    (project / 'data/Skills.json').write_text(json.dumps([None, {'id': 1, 'name': 'Bolt', 'animationId': ids['Other']}]))
+    (project / 'data/Troops.json').write_text(json.dumps([None, {'id': 1, 'pages': [{'list': [
+        {'code': 337, 'indent': 0, 'parameters': [0, ids['HitPhysical'], False]}]}]}]))
+    out = retire('--ids', str(ids['Other']), '%d,%d' % (ids['HitPhysical'], moved_id), code=2)
+    require('skill 1 Bolt' in out and 'Troops.json (command 337)' in out and anim_file.read_bytes() == before, out)
+    passed += 1; print('PASS retire refuses animations a skill or a battle event uses, naming each')
+    out = retire('--ids', str(moved_id), str(hdr_id), '--archive', str(archive))
+    require('DRY RUN' in out and anim_file.read_bytes() == before and (hdr_dir / 'T-hdr.efkefc').exists()
+            and not archive.exists(), out)
+    passed += 1; print('PASS retire without --apply changes nothing')
+    (hdr_dir / 'Old.efkefc').write_bytes(b'an earlier round installed without an animation')
+    out = retire('--ids', str(moved_id), str(hdr_id), '--archive', str(archive), '--orphans', 'Edited/HDR', '--apply')
+    raw = anim_file.read_bytes().decode('utf-8')
+    after = json.loads(raw)
+    old = json.loads(before)
+    blank = {'name': '', 'flashTimings': [], 'soundTimings': [], 'effectName': '', 'displayType': 0, 'offsetX': 0,
+             'offsetY': 0, 'rotation': {'x': 0, 'y': 0, 'z': 0}, 'scale': 100, 'speed': 100}
+    require('RETIRE OK' in out and len(after) == len(old) and after[moved_id] == dict(blank, id=moved_id)
+            and after[hdr_id] == dict(blank, id=hdr_id)
+            and all(after[i] == old[i] for i in range(len(old)) if i not in (moved_id, hdr_id))
+            and raw.count('\r\n') == before.decode('utf-8').count('\r\n')
+            and not (project / 'effects/Edited/Moved/T.efkefc').exists() and not (hdr_dir / 'T-hdr.efkefc').exists()
+            and not (hdr_dir / 'T-hdr.hdr.json').exists() and (hdr_dir / 'T-ldr.efkefc').exists()
+            and (archive / 'effects/Edited/HDR/T-hdr.hdr.json').exists() and (archive / 'effects/Edited/HDR/Old.efkefc').exists()
+            and not (hdr_dir / 'Old.efkefc').exists() and (hdr_dir / 'Glow.efkefc').exists()
+            and (project / 'effects/Edited/HDR/Texture').is_dir(), out)
+    passed += 1; print('PASS retire blanks the slots in place, moves the effect, its sidecar and unplayed effects out, keeps shared resources')
+    out = retire('--restore', str(archive / 'retired.json'), '--apply')
+    require('RESTORE OK' in out and anim_file.read_bytes() == before and (hdr_dir / 'T-hdr.hdr.json').exists()
+            and (hdr_dir / 'Old.efkefc').exists()
+            and (project / 'effects/Edited/Moved/T.efkefc').exists(), out)
+    passed += 1; print('PASS --restore puts entries and files back byte for byte')
     print('RESULT: %d passed, 0 failed' % passed)
 
 
