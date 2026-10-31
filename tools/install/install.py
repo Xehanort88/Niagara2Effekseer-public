@@ -178,6 +178,12 @@ def hdr_sidecar(path, fallback):
             v = b.get(k)
             if v is not None and not (isinstance(v, list) and len(v) == 6 and all(num(x) and ok(x) for x in v)):
                 bad.append('bloom.%s must be six %s numbers' % (k, 'positive' if k == 'sizes' else 'nonnegative'))
+    if 'companion' in side:
+        cp = side['companion']
+        if not isinstance(cp, str) or not cp.strip() or cp.lower().endswith('.efkefc') or cp == side.get('fallback'):
+            bad.append('companion must name a different ordinary effect without .efkefc')
+    if 'companionOccludes' in side and not isinstance(side['companionOccludes'], bool):
+        bad.append('companionOccludes must be a boolean')
     fb = side.get('fallback')
     if not isinstance(fb, str) or not fb.strip() or fb.lower().endswith('.efkefc'):
         bad.append('fallback must name the graded twin, without .efkefc')
@@ -203,8 +209,10 @@ def main():
     p.add_argument('--port', type=int, default=8798)
     p.add_argument('--hdr', type=Path, help='HDR sidecar to install beside the effect (default: <spec name>.hdr.json beside the spec)')
     p.add_argument('--hdr-fallback', help="name of the installed graded twin, written into the sidecar's fallback")
+    p.add_argument('--no-animation', action='store_true', help='install and lint effect/resources without changing Animations.json')
     a = p.parse_args()
-    if (a.id is None) == (a.name is None):
+    if a.no_animation and (a.name is not None or a.id is not None or a.ingame): fail('--no-animation cannot be combined with --name, --id or --ingame', 2)
+    if not a.no_animation and (a.id is None) == (a.name is None):
         fail('pass --name (a new animation) or --id (an existing one)', 2)
 
     project, spec = a.project.resolve(), a.spec.resolve()
@@ -236,9 +244,14 @@ def main():
         if twin.resolve() == target.resolve():
             fail('HDR sidecar fallback %r names this effect itself; it must be the graded twin' % fb, 2)
         if not twin.is_file():
-            fail('HDR fallback twin %s is not installed: install the graded twin first (or pass --hdr-fallback)' % twin, 2)
+            fail('HDR fallback twin %s is not installed: install order: twin, companion, then the HDR effect (or pass --hdr-fallback)' % twin, 2)
         if twin.with_name(twin.stem + '.hdr.json').exists():
             fail('HDR fallback twin %s has its own sidecar: the fallback must be a normally graded effect' % twin, 2)
+        if side.get('companion'):
+            cp = side['companion']
+            companion = project / 'effects' / (cp + '.efkefc') if '/' in cp else target.with_name(cp + '.efkefc')
+            if companion.resolve() in (target.resolve(), twin.resolve()) or not companion.is_file() or companion.with_suffix('.hdr.json').exists():
+                fail('HDR companion %s must be a separate installed ordinary effect without a sidecar; install order: twin, companion, then the HDR effect' % companion, 2)
         print('0. HDR sidecar %s (fallback %s)' % (side_src.name, fb))
     elif Path(dest).name.lower().endswith('-hdr'):
         fail('%s is an -hdr effect but %s is missing: the engine fails it closed without its sidecar (pass --hdr FILE)'
@@ -276,6 +289,9 @@ def main():
         side_dst.write_text(json.dumps(side, indent=2) + '\n', encoding='utf-8')
         print('  HDR sidecar written: ' + str(side_dst))
 
+    if a.no_animation:
+        print('INSTALL OK: %s (no animation; Animations.json unchanged)' % dest)
+        return
     print('4. animation')
     anim_id = repoint_animation(anim_path, a.id, dest, a.display_type) if a.id is not None else add_animation(anim_path, dest, a.name, a.replace, a.display_type)
 

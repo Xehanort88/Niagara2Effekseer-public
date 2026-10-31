@@ -127,10 +127,25 @@ def retire(a, project, anim_path):
         name = data[i]['effectName']
         files = [] if name in staying else effect_files(effects, name)
         plan.append((i, data[i], files, name in staying))
+    # Companions belong to the HDR effect unless a remaining sidecar or animation uses them.
+    moving = {p.resolve() for _, _, files, _ in plan for p in files}
+    protected = {(effects / (name + '.efkefc')).resolve() for name in staying if name}
+    candidates = set()
+    for side in effects.rglob('*.hdr.json'):
+        metadata = json.loads(side.read_text(encoding='utf-8'))
+        for key in ('fallback', 'companion'):
+            name = metadata.get(key)
+            if not name: continue
+            file = effects / (name + '.efkefc') if '/' in name else side.with_name(name + '.efkefc')
+            if side.resolve() not in moving: protected.add(file.resolve())
+            elif key == 'companion': candidates.add(file.resolve())
+    companions = sorted(candidates - protected - moving)
+    if plan:
+        plan[0][2].extend(file for file in companions if file.is_file())
     orphans = []
     if a.orphans:
         root = effects / a.orphans.replace('\\', '/').strip('/')
-        played = {(effects / (n + '.efkefc')).resolve() for n in staying if n}
+        played = {(effects / (n + '.efkefc')).resolve() for n in staying if n} | protected
         orphans = [f for f in sorted(root.rglob('*.efkefc')) if f.resolve() not in played
                    and all(f not in fs for _, _, fs, _ in plan)]
         orphans += [f.with_name(f.stem + '.hdr.json') for f in orphans if f.with_name(f.stem + '.hdr.json').is_file()]

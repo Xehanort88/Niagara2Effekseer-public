@@ -214,6 +214,38 @@ def main():
             and (hdr_dir / 'Old.efkefc').exists()
             and (project / 'effects/Edited/Moved/T.efkefc').exists(), out)
     passed += 1; print('PASS --restore puts entries and files back byte for byte')
+    before = anim_file.read_bytes()
+    r = subprocess.run([sys.executable,str(ROOT/'tools/install/install.py'),'--project',str(project),'--spec',str(lspec),
+        '--dest','Edited/HDR/Body','--no-animation','--tool',str(a.tool),'--work',str(work/'stage-body')],capture_output=True,text=True)
+    require(r.returncode==0 and anim_file.read_bytes()==before,r.stdout+r.stderr)
+    passed += 1; print('PASS --no-animation installs without changing Animations.json bytes')
+    for fields in [{'companion':''},{'companion':None},{'companion':'Body.efkefc'},{'companion':'T-ldr'},{'companionOccludes':1},
+                   {'companion':'T-hdr'},{'companion':'Missing'},{'companion':'T-hdr2'}]:
+        side.write_text(json.dumps(dict(good,**fields)))
+        out=put('Edited/HDR/T-hdr',hspec,'--replace',code=2)
+        require('companion' in out,out)
+    passed += 1; print('PASS invalid, self, twin, missing and HDR companions refused')
+    side.write_text(json.dumps(dict(good,companion='Body')))
+    put('Edited/HDR/T-hdr',hspec,'--replace')
+    archive2=work/'retired-companion'
+    retire('--ids',str(hdr_id),'--archive',str(archive2),'--apply')
+    require(not (hdr_dir/'Body.efkefc').exists(),'companion was not retired')
+    retire('--restore',str(archive2/'retired.json'),'--apply')
+    require((hdr_dir/'Body.efkefc').exists(),'companion was not restored')
+    passed += 1; print('PASS retire/restore includes the companion')
+    (hdr_dir/'Shared.hdr.json').write_text(json.dumps(dict(good,companion='Body')))
+    archive3=work/'retired-shared'
+    retire('--ids',str(hdr_id),'--archive',str(archive3),'--apply')
+    require((hdr_dir/'Body.efkefc').exists(),'a companion used by another sidecar must stay')
+    retire('--restore',str(archive3/'retired.json'),'--apply')
+    (hdr_dir/'Shared.hdr.json').unlink()
+    entries=json.loads(anim_file.read_text());entries.append(dict(entries[hdr_id],id=len(entries),name='Body animation',effectName='Edited/HDR/Body'))
+    anim_file.write_bytes(('[\r\n'+',\r\n'.join(json.dumps(e,separators=(',',':'))for e in entries)+'\r\n]').encode())
+    archive4=work/'retired-shared-animation'
+    retire('--ids',str(hdr_id),'--archive',str(archive4),'--apply')
+    require((hdr_dir/'Body.efkefc').exists(),'a companion used by another animation must stay')
+    retire('--restore',str(archive4/'retired.json'),'--apply')
+    passed+=1;print('PASS sidecar and animation references protect a shared companion')
     print('RESULT: %d passed, 0 failed' % passed)
 
 

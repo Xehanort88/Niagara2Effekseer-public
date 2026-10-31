@@ -96,6 +96,20 @@ def find_ffmpeg(given):
         return None
 
 
+FRAME_RE = re.compile(r'^s?(\d+)$')
+
+
+def frame_second(p):
+    """The second a 1 fps frame shows: ours are 0000.png, the preview skill's (preview.py footage) s000.png beside its
+    sheet.png; both count from 0."""
+    return int(FRAME_RE.match(p.stem)[1])
+
+
+def frame_pngs(frames):
+    """A frames-1fps folder's frames in time order, whichever tool wrote them; other PNGs (sheet.png) are left out."""
+    return sorted((p for p in frames.glob('*.png') if FRAME_RE.match(p.stem)), key=frame_second)
+
+
 def contact_sheet(pngs, fps, out, cols=6, width=240):
     from PIL import Image, ImageDraw
     if not pngs:
@@ -107,7 +121,7 @@ def contact_sheet(pngs, fps, out, cols=6, width=240):
     for i, p in enumerate(pngs):
         x, y = i % cols * width, i // cols * (h + 18)
         sheet.paste(Image.open(p).convert('RGB').resize((width, h)), (x, y + 18))
-        sec = int(p.stem)
+        sec = frame_second(p)
         draw.text((x + 4, y + 3), '%d s' % sec + (' / f%d' % round(sec * fps) if fps else ''), fill=(230, 230, 230))
     out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(out)
@@ -127,14 +141,14 @@ def footage(folder, ffmpeg, work):
         d = re.search(r'Duration: (\d+):(\d+):([\d.]+)', probe)
         info['fps'] = float(m[1]) if m else None
         info['seconds'] = int(d[1]) * 3600 + int(d[2]) * 60 + float(d[3]) if d else None
-        if not any(frames.glob('*.png')):
+        if not (frames.is_dir() and frame_pngs(frames)):
             frames.mkdir(exist_ok=True)
             r = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-i', str(v), '-vf', 'fps=1',
                                 '-start_number', '0', str(frames / '%04d.png')])
             if r.returncode:
                 info['error'] = 'ffmpeg exited %d' % r.returncode
                 continue
-        pngs = sorted(frames.glob('*.png'))
+        pngs = frame_pngs(frames)
         info['count'] = len(pngs)
         sheet = work / 'footage' / ('sheet-%s.png' % v.stem)
         contact_sheet(pngs, info['fps'], sheet)

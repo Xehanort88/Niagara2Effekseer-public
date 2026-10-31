@@ -253,7 +253,18 @@ def main():
         f = data['footage'][0]
         check('footage 1 fps frames named by second', f['fps'] == 30.0 and f['count'] == 3 and
               (folder / 'frames-1fps-footage' / '0000.png').exists() and (out / f['sheet']).exists(), f)
-    else:                                     # a skip here passed as '0 failure(s)' (AGENTS.md: a SKIP is a failure)
+        # a clip the preview skill sheeted first (preview.py footage: s000.png ... + sheet.png in the same folder)
+        pv = folder / 'frames-1fps-footage'
+        for i, p in enumerate(sorted(pv.glob('*.png'))):
+            p.replace(pv / ('s%03d.png' % i))
+        Image.new('RGB', (8, 8)).save(pv / 'sheet.png')
+        r = subprocess.run([sys.executable, script, str(folder), '--work', str(out), '--skip-digest', '--overwrite'],
+                           capture_output=True, text=True)
+        f2 = json.loads((out / 'layers.json').read_text())['footage'][0] if r.returncode == 0 else {}
+        check('footage sheeted by preview.py (s000.png + sheet.png) read as its 3 frames', r.returncode == 0 and
+              f2.get('count') == 3 and not (pv / '0000.png').exists(), r.stderr[-400:] + str(f2))
+        shutil.rmtree(pv)
+    else:                                    # a skip here passed as '0 failure(s)' (AGENTS.md: a SKIP is a failure)
         check('footage: an ffmpeg to test with', False, 'none on PATH, in out/edits/*/scratch/pylib/imageio_ffmpeg, '
               'or from the imageio-ffmpeg package (pip install imageio-ffmpeg)')
     r = subprocess.run([sys.executable, script, str(folder), '--work', str(out), '--skip-digest'],
