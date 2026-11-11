@@ -271,8 +271,8 @@ def flipped(m, r):
 
 
 def time_row(raw):
-    """t of the first constant-buffer row shaped like Unity's _Time (t/20, t, 2t, 3t), else None. WotR's and Rogue
-    Trader's shaders keep no names, but the row keeps its shape. Both games put a second clock of the same shape a few
+    """t of the first constant-buffer row shaped like Unity's _Time (t/20, t, 2t, 3t), else None. WotR's and Unity
+    game B's shaders keep no names, but the row keeps its shape. Both games put a second clock of the same shape a few
     rows after it (WotR 4 rows, ~21 s ahead; RT 5 rows, ~27 s ahead): the first is _Time, as WotR's a Unity study effect
     showed (its 0.502 s between captures 3465 and 3491 fits the sigil's 10 deg/s turn; the second clock's 1.396 s
     does not), so later rows never count."""

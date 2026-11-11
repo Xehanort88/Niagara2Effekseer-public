@@ -289,6 +289,50 @@ def save_model(path, rows, faces):
     return {'bytes': len(data), 'vertices': len(rows), 'triangles': len(faces), 'strict_readback': True, 'sha256': hashlib.sha256(data).hexdigest()}
 
 
+def centre_uv2(rows, cm_per_unit):
+    """UV2 for --uv2-centre: each vertex's offset from the model origin in Unreal centimetres, split as (|x|, |(y, z)|)
+    in Unreal axes (glb (x, y, z) = Unreal (x, z, y)). A material that knows the particle's size (sx, syz) gets the
+    distance to the particle's centre, sqrt((sx u)^2 + (syz v)^2), exact while the size's Y and Z agree: Effekseer
+    gives a model's pixel stage no object position or scale."""
+    return [[abs(f32(r[0])) * cm_per_unit, math.hypot(f32(r[1]), f32(r[2])) * cm_per_unit] for r in rows]
+
+
+def model_bytes_v6(rows, faces, uv2):
+    """Effekseer 1.8 model (version 6, one frame): position, normal, binormal, tangent, UV1, UV2, colour per vertex
+    (Effekseer.Model.cpp reads them as one struct). The 1.70 runtime reads up to version 5 only."""
+    require(len(uv2) == len(rows) and all(len(r) in (14, 18) and all(math.isfinite(x) for x in r) for r in rows)
+            and all(len(u) == 2 and all(math.isfinite(x) for x in u) for u in uv2), 'Invalid model vertices')
+    rgba = lambda r: [int(round(255*x)) for x in r[14:18]] if len(r) == 18 else [255, 255, 255, 255]
+    data = (struct.pack('<5i', 6, 1, 1, 1, len(rows)) +
+            b''.join(struct.pack('<16f4B', *r[:14], *u, *rgba(r)) for r, u in zip(rows, uv2)) +
+            struct.pack('<i', len(faces)) + b''.join(struct.pack('<3i', *f) for f in faces))
+    require(len(data) == 24+68*len(rows)+12*len(faces), 'Model byte length mismatch')
+    return data
+
+
+def parse_model_v6(data):
+    require(len(data) >= 24 and struct.unpack_from('<4i', data) == (6, 1, 1, 1), 'Expected v6 single-frame model')
+    count = struct.unpack_from('<i', data, 16)[0]
+    require(count > 0 and 24+68*count <= len(data), 'Invalid vertex count')
+    rows = [list(struct.unpack_from('<16f', data, 20+68*i)) + [x/255.0 for x in data[84+68*i:88+68*i]] for i in range(count)]
+    faces_count = struct.unpack_from('<i', data, 20+68*count)[0]
+    require(faces_count >= 0 and len(data) == 24+68*count+12*faces_count, 'Unparsed/truncated model bytes')
+    faces = [list(struct.unpack_from('<3i', data, 24+68*count+12*i)) for i in range(faces_count)]
+    require(all(0 <= x < count for f in faces for x in f) and all(math.isfinite(x) for r in rows for x in r), 'Invalid model values')
+    return rows, faces
+
+
+def save_model_v6(path, rows, faces, uv2):
+    data = model_bytes_v6(rows, faces, uv2)
+    path.write_bytes(data)
+    stored, indices = parse_model_v6(path.read_bytes())
+    rgba = lambda r: [round(255*x)/255.0 for x in r[14:18]] if len(r) == 18 else [1.0, 1.0, 1.0, 1.0]
+    want = [[f32(x) for x in r[:14]] + [f32(x) for x in u] + rgba(r) for r, u in zip(rows, uv2)]
+    require(indices == faces and stored == want, 'Model read-back mismatch')
+    return {'bytes': len(data), 'vertices': len(rows), 'triangles': len(faces), 'strict_readback': True, 'version': 6,
+            'sha256': hashlib.sha256(data).hexdigest()}
+
+
 def load_image(path, size):
     with Image.open(path) as source:
         if source.mode.startswith('I;16') or source.mode == 'I':
@@ -460,6 +504,10 @@ def parser():
     p.add_argument('--no-weld',action='store_true',
                    help='keep duplicate vertices; only for reproducing models built before welding '
                         '(generated tangents are then per triangle, which can show facets)')
+    p.add_argument('--uv2-centre',type=float,metavar='CM_PER_UNIT',
+                   help='write an Effekseer 1.8 (v6) model whose UV2 holds each vertex offset from the origin in Unreal cm '
+                        '(|x|, |(y, z)| in Unreal axes) at this many cm per model unit (40 at --scale 2.5): a material '
+                        'can then measure the distance to the particle centre')
     p.add_argument('--maps',type=Path,default=Path('.'))
     for role in ['color','normal','emission','roughness','metallic','ao']: p.add_argument('--'+role)
     p.add_argument('--flip-normal-green',action='store_true')
@@ -510,7 +558,12 @@ def run(args):
     args.out.mkdir(parents=True,exist_ok=True)
     for folder in ['Model','Texture','Materials']: (args.out/folder).mkdir(exist_ok=True)
     rotate(rows,angles)
-    models = {args.name:save_model(args.out/'Model'/(args.name+'.efkmodel'),rows,faces)}
+    if args.uv2_centre is not None:
+        require(math.isfinite(args.uv2_centre) and args.uv2_centre > 0, '--uv2-centre must be positive')
+        require(not args.overlay_uv, '--uv2-centre with --overlay-uv is not supported')
+        models = {args.name:save_model_v6(args.out/'Model'/(args.name+'.efkmodel'),rows,faces,centre_uv2(rows,args.uv2_centre))}
+    else:
+        models = {args.name:save_model(args.out/'Model'/(args.name+'.efkmodel'),rows,faces)}
     if args.overlay_uv:
         overlay = spherical(rows) if args.overlay_uv == 'spherical' else [r[:12]+list(source_uv[i]) for i,r in enumerate(rows)]
         models[args.name+'-overlay'] = save_model(args.out/'Model'/(args.name+'-overlay.efkmodel'),overlay,faces)
@@ -530,7 +583,9 @@ def run(args):
               'main_whole_bounds':bounds([x for p in main for x in p['pos']]),'main_core_bounds':fit_bounds,
               'geometry_whole_bounds':bounds([x for p in source for x in p['pos']]),
               'geometry_core_bounds':bounds([x for p in source if p['material'] in fit for x in p['pos']]),
-              'saved_bounds':bounds([r[:3] for r in parse_model((args.out/'Model'/(args.name+'.efkmodel')).read_bytes(),args.vertex_colours)[0]]),
+              'saved_bounds':bounds([r[:3] for r in (parse_model_v6((args.out/'Model'/(args.name+'.efkmodel')).read_bytes()) if args.uv2_centre is not None
+                                                     else parse_model((args.out/'Model'/(args.name+'.efkmodel')).read_bytes(),args.vertex_colours))[0]]),
+              'uv2_centre_cm_per_unit':args.uv2_centre,
               'saved_core_bounds':bounds([[f32(x) for x in rows[i][:3]] for i in core_indices]),
               'sections':sections,'models':models,'textures':textures,'map_roles':roles,
               'surface_missing_roles':[r for r in ['roughness','metallic','ao'] if r not in roles],

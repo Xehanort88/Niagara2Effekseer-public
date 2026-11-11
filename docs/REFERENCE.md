@@ -24,8 +24,8 @@ of the repository.
 | `tools/hlslcheck/` | Checks that `.efkmat` file materials compile as DirectX HLSL, as the Effekseer editor builds them (Windows, with tests). |
 | `tools/assetinspect/` | Read-only inspection of source assets: binary FBX inventory, texture contact sheets, OBJ wireframes (with tests). |
 | `tools/rdcdigest/` | Digests RenderDoc captures once into a content-addressed store (draw state, cbuffers, textures, meshes, shaders, targets, each kept draw's contribution and post-VS output, dynamic textures it reads, GPU times) and queries it without replaying (README § Digesting RenderDoc captures, with tests). |
+| `tools/unity/` | Unity front end: Studio FX-reference index, UnityPy bundle dumper and Shuriken prefab summaries with a census, and `unity_rdc.py`, the capture side (digest, footage sheet, upright layer report), packed for Windows by `pack.py` (README § Studying a Unity (Shuriken) effect, with tests). |
 | `tools/ingame/` | Plays animations in a real game project's battle scene on the real GPU: first-cast freeze, frame times, end, per-frame captures. |
-| `tools/effectjob/` | Per-effect manifest, preflight, runner and emitter ledger for multi-system Cascade/Niagara rebuilds (README § Effect manifest and ledger, with tests). |
 | `plugins/` | RPGReactor plugins (mods) for game projects, e.g. `ReactorEffectPreload.js`. |
 | `docs/TRAIL-CHECKLIST.md` | Checklist and diagnosis order for trail effects that look doubled, sharp or too short. |
 | `efkefc_dump.py` | `.efkefc` → readable XML decoder (independent of the C# path). |
@@ -46,6 +46,30 @@ git submodule update --init --depth 1
 ```bash
 dotnet build src/Niagara2Efk/Niagara2Efk.csproj -c Release -p:Platform=x64
 ```
+
+On a fresh Linux sandbox or cloud container (Ubuntu 24.04 tested), one script does all of it: submodules,
+the .NET 9 SDK when none is on `PATH`, the Python modules the test suites use, and both tool builds.
+
+```bash
+bash tools/setup/cloud_setup.sh
+```
+
+It tries Microsoft's `dotnet-install.sh` first and, where `builds.dotnet.microsoft.com` is blocked (the
+default cloud network policy), installs conda-forge's build of SDK 9.0.318 instead, pinned by name and
+sha256. The SDK goes to `/opt/dotnet` (`DOTNET_DIR`), linked as `/usr/local/bin/dotnet`, with
+`DOTNET_ROOT` in `~/.bashrc`. Running it again skips what is already done; `SKIP_BUILD=1` stops before the
+builds. It needs github.com, conda.anaconda.org, pypi.org and api.nuget.org, and took about 35 s.
+
+Claude Code cloud sessions run it by themselves: `.claude/settings.json` registers a SessionStart hook,
+`.claude/hooks/session-start.sh`, that does nothing unless `CLAUDE_CODE_REMOTE=true` (so local sessions,
+Codex and Antigravity are untouched; the settings command checks it before starting bash, and `.gitattributes`
+keeps `*.sh` at LF so Git Bash can parse them). In a cloud session it runs the script without builds every time
+(under a second once everything is there). It builds when a tool DLL is missing, and at session startup also
+when a fingerprint of `src/`, `tools/setup/` and the hook (tracked blobs, uncommitted changes, untracked files
+under `src/`, submodule commits) differs from the one stored after its last build
+(`src/Niagara2Efk/bin/.session-start.sha256`), or when a DLL was rebuilt by hand since. On resume, `/clear`
+and `/compact`, which land mid-session, changed sources only get a note. Its output goes to
+`out/setup/session-start.log`; the session sees one line, or `cloud setup FAILED` with the log's last lines.
 
 ### Two builds: Effekseer 1.70e and 1.8
 
@@ -314,6 +338,83 @@ dotnet src/Niagara2Efk/bin/x64/Release/net9.0/Niagara2Efk.dll selftest out/catal
 
 ### Testing
 
+To run every suite below (and the cascade, author, install, niagara, effectjob and in-game ones the
+sections further on name) in one go, each with its own arguments:
+
+```bash
+python tools/run_all_tests.py --work out/tests/all
+```
+
+It prints one line per suite: `PASS`, `SKIP` (ran, but some tests skipped: the reasons are shown, and a
+`SKIP` from the cascade suites is a failure to fix), `FAIL` (a non-zero exit, or a failure line despite exit
+0), `TIMEOUT` (`--timeout`, default 1200 s per suite; only the process tree the runner started is stopped),
+`UNKNOWN` (exit 0 but no summary line it recognises: read the log) or `NOT RUN` (an input is missing:
+`--master` for the `test_ue423*` suites, `--project` for the HDR overlay test, a font for the letter sheets,
+the TS dossiers, a Python module or `node`). Full output is in `<work>/logs/<suite>.log`, every line in
+`<work>/summary.json`. `--only cascade,edit` picks suites by name, `--list` lists them, and `--port`
+(default 8931) is the in-game suites' port. Exit 0 means every selected suite passed, 1 any `FAIL`,
+`TIMEOUT` or `UNKNOWN`, 2 nothing failed but something skipped, did not run, or a `test_*` file on disk is
+not registered in the runner (it warns about each one; add new suites to its `SUITES` table). It also
+prints whether both tool builds exist, since `test_build_effekseer` skips without the 1.70e DLL. `run.js` finds
+its browser as `--chrome`, else `N2E_CHROME`, else `C:/Program Files/Google/Chrome/Application/chrome.exe`, else
+Playwright's Chromium (a Linux cloud container has one; there it uses SwiftShader WebGL and `--no-sandbox`); only
+when none is there does the runner give `test_ingame.js` `--no-chrome`, which reports `SKIP`. The corpus `selftest`
+is not part of it.
+
+#### Test data for a cloud session
+
+Several suites read game exports and other tasks' outputs from the local drives (`E:/…/Exports`,
+`D:/…/out/edits`, `out/catalogue.json`), so in a cloud session they fail or do not run. To run them there for a
+while, upload exactly the files they read, on a branch of their own, and delete it afterwards:
+
+```bash
+python tools/run_all_tests.py --work out/tests/trace --trace-files --only cascade-bd2,cascade-ot2port,cascade-tsport,niagara,effectjob
+python tools/testdata/pack.py --traces out/tests/trace/traces --out testdata --dry-run
+python tools/testdata/pack.py --traces out/tests/trace/traces --out testdata
+```
+
+Run these on the machine that has the data. `--trace-files` makes every Python process of each suite record
+the files it reads outside the repository, its work folder and Python's install (`<work>/traces/<suite>.tsv`;
+repository `out/` files count as external). It also records files a test only checks for (`exists`/`is_file`:
+tests check their inputs, and `dotnet` may then read them), files named on a `dotnet`/`node` command line or inside
+a JSON file on it (an `edit` spec names its textures and models), and folders passed there (a `--meshes` folder:
+`pack.py` copies the files directly in it, up to 50 MB). The first upload of 2026-11-02 was traced without the last
+two, which left out one effect's meshes, a dossier and a default texture. The dry run
+prints `REPORT.md`: files and megabytes per suite, files over 95 MB (GitHub refuses 100 MB; not copied), and
+folders that were only listed (not copied; `--listing <folder>` adds one whose files a test counts). The packed
+folder mirrors each path: `E:/a/b` → `testdata/E/a/b`, repository files → `testdata/_repo/<path>`. Commit it on a
+branch that is never merged, e.g. `git switch -c testdata-20261102`, `git add -f testdata`, commit, push. In the
+cloud session:
+
+```bash
+bash tools/testdata/link.sh testdata-20261102
+python tools/run_all_tests.py --work out/tests/all --only cascade-bd2
+bash tools/testdata/link.sh --remove
+```
+
+`link.sh` extracts the branch's `testdata/` to `/opt/n2e-testdata` without touching the checkout and links it
+where the tests look. On Linux a path like `E:/Games/…` is relative, resolved against the repository root
+where the runner starts every suite, so `E:` and `D:` there become links to symlink farms under `/opt/n2e-drives`
+(listed in `.git/info/exclude`, so `git status` stays clean). The repository's own Windows path (from
+`manifest.json`) links to the checkout, and `_repo/out/…` files are copied into `out/` (never over an existing
+file; `--remove` deletes only those). The data is extracted as real files, not links, because the builders compare
+`resolve()`d paths. A tool that changes its working folder before opening such a path will not find it; its trace in
+the cloud shows that. Delete the branch when done (`git push origin --delete testdata-20261102`); it never reaches
+main, so `tools/release/sync_public.py` never sees it.
+
+What only Windows can run comes along as stored results. `tools/wincache.py` wraps d3dcompiler_47 (`D3DCompile`,
+`D3DDisassemble`: `ueshader`, `gpulink`, `hlslcheck`, the TS oracle) and `decompress_shader.exe` (`gpulink`): on
+Windows it runs them as before and stores each result in `out/cache/wincache/<kind>/<sha256 of the input>.json`; a
+traced run lists those files, so `pack.py` uploads them; elsewhere the stored result is read back, and a missing one
+stops with `wincache.Unavailable` ("needs Windows ... run the same step once on Windows") instead of a ctypes error.
+`hlslcheck` reports such a material as `N/A` and exits 2. `tools/portpath.py` covers the rest of the difference:
+folder lists split on `os.pathsep` (`:` on Linux, also inside `E:/…`) are joined back (`split_paths`), Windows paths
+stored inside data files get forward slashes (`native`), and an export whose letter case differs from its reference
+is still found (`find`). On Windows all three return what the plain code did. `python tools/test_portable.py --work
+out/tests/portable` checks them, `hlslcheck`'s `N/A` path and a `link.sh` round trip. The lint catalogue of
+`check_build.py` and `effectjob.py` can be named with `N2E_CATALOGUE`; `test_effectjob.py` uses an empty stub
+when `out/catalogue.json` is missing.
+
 Run the generated-fixture `edit`/`dump` regression suite with system Python
 (standard library only) and the .NET 9 SDK:
 
@@ -341,6 +442,7 @@ the DLL is missing).
 
 ```bash
 python tools/assetinspect/test_assetinspect.py --work out/tests/assetinspect
+python tools/unity/test_unity.py --work out/tests/unity
 python tools/rdcdigest/test_rdcdigest.py --work out/tests/rdcdigest
 python tools/fontatlas/test_make_atlases.py --work out/tests/fontatlas
 node tools/ingame/test_ingame.js --work out/tests/ingame --port 8931
@@ -349,6 +451,9 @@ node tools/ingame/test_ingame.js --work out/tests/ingame --port 8931
 The asset-inspection tests write their own binary FBX files (both record
 layouts, raw and zlib arrays, plus truncated, corrupt, ASCII and big-endian
 variants), OBJ text and PNGs; no third-party asset is used.
+The Unity tests need PyYAML (not UnityPy): they write one prefab as Unity YAML with its `.meta`/`.mat`/`.shader`
+files and as stand-in UnityPy readers for the dumper, check that both summarise alike, and build their own
+modding-template tar for the Studio index.
 The letter-sheet tests need fontTools to build their fixture fonts (subsets of
 `--font`, default Arial: missing `Z` and `!`, an empty `Z`, `Z` mapped to
 glyph 0, `Z` and `Q` drawn with the `X` and `O` glyphs) and git, to
@@ -1638,6 +1743,11 @@ incomplete and `--strict` exits 3. `edit` takes the same counts after VERIFY and
 `WARNING: rendering nodes 1025 > 1024: the runtime will not load this effect`; it still writes
 the file and exits 0, so a spec that adds nodes can be checked before trimming.
 
+A drawn node whose `DepthValues/DepthOffset` is 10.4545 or more gets a `DEPTH node <path> (<name>)` line and
+`LINT DEPTH:` at the end (`Effects[].DepthOffsets`, `DepthFindings` in the JSON), and `edit` a matching `WARNING`:
+that offset carries a particle at the effect past RPGReactor's battle-camera near plane, so it never draws (README §
+Building a Cascade effect, `--source-camera-distance`). It does not change the exit status.
+
 ## Letter sheets from a font
 
 The POLISH Classical Quests and Results packs spell their words from four
@@ -1761,9 +1871,20 @@ compiled at load) froze about 250 ms uncovered and 6 ms preloaded
 (`out/edits/firstcast-freeze-20261015/NOTES.md`). Quote both numbers, and say
 which is which.
 
+**Which Effekseer path.** Since RPG Reactor runtime 20261027.3 (Reactor commit f41e5c9f, 2026-10-27) the game
+plays screen animations inside PIXI's scene: each in an Effekseer context of its own on PIXI's WebGL2 context
+(`Sprite_Animation.SceneLayer`), drawn under the windows and inside the spriteset's colour filters. The older overlay
+canvas is the engine's fallback (`Graphics.effekseerInScene = false`, WebGL1 or WebGPU, a lost context). The tool
+measures whichever path the game takes, by default the in-scene one: loads in the layer's own context, draw time
+around `SceneLayer.draw` / `drawHdr`, live instances per context, captures from the game's canvas. `--overlay` (jobs
+file `"overlay": true`, tags `-ovl`) forces the fallback, and every result says which it played on
+(`effekseerPath: scene | overlay`). Before 2026-10-28 the tool knew only the overlay: on the new runtime its
+update wrapper, bound to the overlay's context, stepped the overlay whenever the engine stepped the scene's, so no
+in-scene effect ever advanced. Every run reported "did not end", with no load time and black captures.
+
 Capture mode (`--mode capture`, `--step N`, `--shots N`) saves what the player
-sees every Nth game frame as raw RGBA, at half resolution. While an effect plays,
-the Effekseer overlay canvas holds the whole composited frame. The game runs
+sees every Nth game frame as raw RGBA, at half resolution: from the game's canvas when effects play in the scene, from
+the Effekseer overlay canvas (which then holds the whole composited frame) on the fallback path. The game runs
 exactly one update per browser frame, so two runs of the same files match
 within a small noise floor. `compare.js` counts differing pixels per frame
 against a base run, with a second identical run as the noise floor:
@@ -1885,8 +2006,31 @@ format, re-reading the file just before writing and refusing if another session
 changed it meanwhile, and with `--ingame` plays it twice in a real battle with
 `tools/ingame/run.js`, once uncovered and, when the project has
 `js/plugins/ReactorEffectPreload.js`, once more with `--preload-id`, printing both freezes. A regenerated texture that clashes with a stale same-named
-copy in the project fails the read-back with an explanation. `--tool` picks the
+copy in the project fails the read-back with an explanation. The same happens to `.efkmat` files rebuilt in a new
+task folder: each embeds its build's texture folder (and a header id and chunk sizes that follow from it), so a
+same-code material differs in bytes from the copy an earlier install put in a shared folder. When that copy is still
+in use, point the spec's material paths at the earlier build's byte-identical files after checking the code matches
+(`out/edits/hdr-companion-20261031/scratch/install_spec_reuse.py`). `--tool` picks the
 `Niagara2Efk.dll`. Its test: `python tools/install/test_install.py --work out/tests/install`.
+
+**Retiring old rounds.** `tools/install/retire.py` takes installed animations out again, reversibly:
+
+```bash
+python tools/install/retire.py --project "../ASSEMBLER TEST PROJECT" --ids 881 882 886-903 --orphans Edited/<Folder>          # the plan only
+python tools/install/retire.py --project "../ASSEMBLER TEST PROJECT" --ids 881 882 886-903 --orphans Edited/<Folder> --apply
+python tools/install/retire.py --project "../ASSEMBLER TEST PROJECT" --restore out/retired/<project>/<stamp>/retired.json --apply
+```
+
+It refuses an id that a skill, item or weapon (`animationId`) or a Show Animation / Show Battle Animation command
+(212/337 in troops, common events and maps) still uses. It blanks each slot in place as the editor leaves a cleared one,
+so no other animation is renumbered, with the same re-read and line-format checks as the install. It also moves the
+effect file (and an HDR sidecar) to `out/retired/<project>/<stamp>/effects/...`, unless an animation that stays plays
+the same file. `--orphans Edited/<Folder>` also moves that folder's effects that no animation plays (rounds repointed
+or never given an entry). Files are moved, never deleted. Shared `Texture/`, `Model/` and `Materials/` stay: other
+effects in the folder read them, and neither a file's name nor its date says who owns it. `retired.json` keeps the old
+entries and the moved paths, and `--restore` puts both back, as long as the slots are still blank. A range runs over
+every id in it, so read the plan's names before `--apply`. First use: a Unity study effect, 2026-10-29 (15 rounds retired,
+884 and 1000 kept).
 
 **No empty frames: an effect ends right after its last drawn frame.** An installed effect should not draw nothing
 for a stretch at its end (or begin with frames where nothing is drawn), and its `endFrame` should be that end, not a
@@ -1914,6 +2058,193 @@ spec that no longer rebuilds the installed file byte for byte (an older tool bui
 `.efkefc` and the resources it names, unchanged. The 25 lightning effects moved into `Edited/Lightning` this way
 (2026-10-07, `out/edits/lightning/move-to-lightning/move.py`): 24 with `--id`, Hit Thunder 306 by copying.
 
+## HDR effect overlay
+
+Runtime 20261031.2 adds `bloom.intensityKeys` (`[[frame, intensity], ...]`) to the sidecar: the bloom intensity on
+the effect's own clock (60 frames a second at speed 100, slowed with battle slow motion), straight lines between keys
+and held outside them; `bloom.intensity` stays, for older runtimes. Same-grade animations whose intensities differ at
+a frame bloom in separate passes.
+
+Runtime 20261031.1 adds an optional ordinary `companion` to the HDR sidecar,
+with `companionOccludes` (boolean, default true). It draws solid bodies under
+the HDR light, sharing the HDR effect's node tree, random seed, clock and
+transforms. Install the twin, then the companion, then the HDR effect, all in
+one folder. `--offset-x` / `--offset-y` set the animation's screen offsets (new animations, or with `--replace` /
+`--id`), as `--display-type` sets its type (a UE 4.23 study effect: `--display-type 2 --offset-y 130`). Install companions
+using `tools/install/install.py --no-animation`
+to leave `Animations.json` byte-identical. Companion names have no `.efkefc`
+extension and resolve like `fallback`; a companion cannot be HDR itself or
+alias the twin or main effect. Older engines ignore the companion fields.
+
+`build_effekseer.py --hdr-companion NAME --companion-occlusion` also puts the dimming of translucent layers in the
+companion: the overlay only adds light, so a translucent layer's `scene x (1 - a)` was lost. Every Blend node is kept with
+its own material and opacity and its colour curve's R, G, B (keys and random offsets) set to 0, so it draws black at
+opacity a under the overlay's `colour x a`; Sub nodes (they only darken) are kept as built. BackDistortion nodes are
+kept in every companion, with or without `--companion-occlusion`: since 2026-11-04 an HDR effect never draws its
+refraction (its BackDistortion nodes go on the alpha-zero material and keep spawning), because the overlay drew the
+copied backdrop as added light. `--companion-skip NAME,...` keeps named layers (and their `_hi`/`_neg`/`car_` nodes)
+from spawning in the companion: it shares the 4000-instance pool with the HDR effect. Pass `--no-companion-occludes`.
+Measured on a BD2 effect: BD2 draws its effects into a separate-translucency
+target whose A channel is that transmittance; from the capture camera, in float, the companion's total occlusion was
+1.01x and 0.96x the game's at 1.86 s and 1.97 s.
+
+**Built into the engine since RPG Reactor 0.99.2 (runtime 20261025.1).** The Reactor source's
+`docs/HDR-EFFECT-OVERLAY.md` is the reference. Projects on that runtime need no plugin: an effect opts in by its
+sidecar alone, with the same format and fallback rules as below. Since runtime 20261027.2 the editor's animation
+previews draw HDR effects in HDR with the sidecar's bloom and grade (Database › Animations has an HDR checkbox; cleared,
+it plays the twin), and play the twin only when the preview has no float targets, the grade does not compile or the
+runtime file cannot be loaded (the Reactor source's `docs/HDR-EFFECT-OVERLAY.md` § Editor previews). The plugin
+below is for projects on older runtimes; with an enabled `ReactorHdrOverlay` entry, the engine passes its parameters
+to the built-in overlay and skips the script. Install the graded twin first, then the HDR effect: `tools/install` takes
+the sidecar beside the spec (`X-hdr.edit.json` -> `X-hdr.hdr.json`, which `effectjob` writes beside the combined build) or
+`--hdr FILE`, refuses (exit 2, before building) an `-hdr` effect without one, a sidecar breaking the contract below, and a
+fallback twin that is not installed, is the effect itself or is HDR too, and writes it beside the installed `.efkefc`;
+`--hdr-fallback NAME` sets the twin's name when the pair is installed under other names. A non-HDR reinstall over a
+leftover sidecar is refused.
+
+`plugins/ReactorHdrOverlay.js` wraps RPGReactor's overlay animation loader and render queue at runtime. It draws
+opted-in effects into a shared WebGL1 half-float target (float fallback), adds UE 4.27's six bloom kernels at reduced
+resolutions, and runs the display grade once on the accumulated light for each distinct grade string in a frame.
+Ordinary animations retain their original drawing function and relative order. HDR groups composite after the ordinary
+queue, in order of their first appearance; interactions between the two queues therefore do not preserve arbitrary
+interleaving. The plugin does not modify engine files. Adoption and installation in a game are separate decisions.
+
+Opt in by installing `<effectName>.hdr.json` beside `<effectName>.efkefc` in the game's `effects/` tree, and the
+normally graded fallback twin alongside it. Metadata is fetched once per effect and cached, including a 404. The
+plugin starts the metadata request when the effect loads. If necessary, animation start waits for metadata so HDR
+materials never draw unprocessed. Invalid metadata fails closed with a warning. Failed float-target allocation or
+shader compilation selects the fallback. A bare fallback name is relative to the HDR effect's folder; a name containing
+`/` is an effect name relative to `effects/`. No filename suffix alone enables HDR.
+
+Sidecar format (the illustrative grade below is replaced by the porter's measured display formula):
+
+```json
+{
+  "version": 1,
+  "grade": "vec3 tmOut = hdr / (hdr + vec3(1.0));",
+  "gradeInput": "hdr",
+  "bloom": {
+    "intensity": 0.675,
+    "sizes": [0.3, 1, 2, 10, 30, 64],
+    "tints": [0.3465, 0.138, 0.1176, 0.066, 0.066, 0.061],
+    "radiusScale": 2.4
+  },
+  "fallback": "Example-ldr"
+}
+```
+
+The grade reads already exposed `vec3 hdr` and declares `vec3 tmOut` in display space. Program compilation is cached
+by the entire grade string. The first sidecar in a grade group supplies its kernel sizes/tints. Use matching bloom
+settings for effects sharing a grade. Plugin parameters supply bloom intensity/radius overrides, buffer type
+(`auto`, `half`, `float`), and debug logging. `window.REACTOR_HDR = {bloom, bloomScale, debugScale, coverage}` supplies
+live test overrides. `[HDR]` animation names and `window.REACTOR_HDR_IDS` can use a validated metadata object supplied
+through `ReactorHdrOverlay.overrides[effectName]`; neither invents a grade or a fallback when metadata is absent.
+
+Build original-asset OT2 materials with `tools/cascade/ot2port_build.py ... --ot2port-hdr --ot2port-display STORE::CAPTURE`
+(and the same `--ot2port-display-taps 1|8`, dossiers and other flags as the ordinary build). Each material retains its
+own exposure, outputs `light * exposure / max(alpha, 1e-4)` with opacity `alpha` for translucent layers, or exposed
+light with opacity 1 for additive layers. Floor/near fades remain after that output. The sidecar contains the same
+grade and tap count at exposure 1, since exposure has already been applied. The ordinary path is unchanged without
+the flag. HDR mode requires an analytic display capture rather than a texture LUT or the older film approximation.
+The sidecar's `bloom` is OT2's, decoded from the captures, not fitted (`ot2_display.HDR_BLOOM`, since 2026-10-26; until
+then the porter wrote UE's defaults above). It holds the setup threshold, six kernel sizes
+(0.28081 .. 38.16336) and the blur gains x the tonemap's bloom scale as tints, intensity 1. `standard` (threshold 0.15,
+scale 8), `holy-light` (-0.8, scale 5) and `high-threshold` (20, scale 10:
+only exposed light above 20 blooms) are read from the display capture's bloom setup
+and tonemap cbuffers. `--ot2port-bloom-setting standard|holy-light|high-threshold` overrides that. A capture matching none
+of them stops the build before it starts. `--ot2port-hdr-radius R` sets
+`bloom.radiusScale` (default 2.4): the effect's size on RPG Reactor's view over its size on the game's. The build
+prints an `HDR SIDECAR:` line with the setting used. On identical light the overlay gives 1.04-1.17x the game's bloom
+energy (`out/edits/ot2-game-bloom-20261025/NOTES.md`).
+The default fallback is the build name without `-hdr`, or `<name>-ldr` when no suffix was present; edit the sidecar
+when naming the installed pair differently. `effectjob` accepts `"hdr": true` at manifest, system, or build level for
+`"builder": "cascade-port"`; the checker verifies the sidecar and absence of per-material grades. Combining requires
+every subsystem to be HDR with the same grade/bloom; the combined fallback defaults to `<combined name without -hdr>-ldr`.
+`"hdr_companion": true` (any scope; HDR variants only) adds `--hdr-companion <build>-companion` to every build: the
+layers that only darken (§ Building a Cascade effect) draw in an ordinary companion. The runner combines the builds'
+companions under the same hosts as the HDR effect into `<combined name without -hdr>-companion`, names it in the final
+sidecar, and lints and hlslchecks it (`COMPANION PASS` line). Install the twin, then the companion with
+`--no-animation`, then the HDR effect, all in one folder.
+
+Generated bloom twins/cards and sprite halo padding are omitted, as are refraction nodes/twins. Each omission is
+reported as `HDR: left out (...)` in `.port.txt` and counted separately in `PORT SUMMARY`. Actual emitters with
+names such as `01_Core_glow`, `glowSub` and `Glow` are retained. Task-local post-processing scripts that add stand-ins
+must omit them too. Unported/default-material layers remain approximations and are identified by the port report.
+
+BD2 effects build HDR with `build_effekseer.py --bd2-hdr` (name the build `<effect>-hdr`): every BD2
+layer writes its light without the per-layer tonemap (additive c x a at opacity 1, translucent c at opacity a; the
+backdrop-aware `_neg`/`_hi` twins are left out, the mixed-sign additive Add/Sub split stays) and the build writes
+`<name>.hdr.json` beside its spec (`bd2.hdr_sidecar`): the grade is the same BD2 tonemap fit as the graded twin, over
+the twin's backdrop V (tmOut = (T(V + hdr) - T(V)) / (1 - T(V)), so the overlay's screen blend over a scene shown at
+T(V) gives T(V + hdr)); the bloom is read from capture BD2_frame115188's post passes (`bd2.BLOOM`: threshold -0.4,
+tints = UE's defaults / 6, the six combining blur passes' weights, the tonemapper's bloom factor 1; kernel sizes from BD2's own blur passes,
+the three wide ones 0.77x TS's). `--bd2-hdr-fallback` names the twin (default the name without `-hdr`), `--bd2-hdr-radius` sets radiusScale
+(BD2's battle camera, 17.1 deg at 23.6 m for one spell: 712 cm of view against RPG Reactor's 399 cm, 1.784) and
+`--bd2-hdr-bloom` the intensity, the capture's tonemapper cb0[39].x, set per spell.
+A spell that animates it (2.0 -> 1.31 -> 0.12) takes `--bd2-hdr-bloom-keys "frame:factor,..."`, each capture's
+cb0[39].x at its effect time x 60 on the build's clock: the sidecar's `bloom.intensityKeys` (runtime 20261031.2+, straight
+lines between keys, held outside them; `intensity` stays for older runtimes). `tools/install` refuses keys on a project
+whose `js/reactor_main.js` revision is older, since that runtime ignores them.
+Lit (deferred) BD2 layers draw only their own emissive in HDR builds, linear and Add, from an unlit material (the overlay adds
+light and cannot draw an opaque body: one effect's rocks keep their molten veins, their dark rock is the graded twin's).
+The work folder needs `bd2-tonemap.json`.
+
+TS effects build HDR pairs through the TS kit with `--tsport-hdr 1` (effectjob `"hdr": true` with `"hdr_radius"` for `"builder": "cascade-ts"`). TS's bloom comes from the captures,
+not from a fit: the same UE 4.27 setup and six blur pairs as OT2, threshold -0.6, tonemap bloom scale 6. On identical
+light, the overlay mirror gives 1.03-1.16x the game's bloom energy (`out/edits/ts-hdr-bloom-20261026/NOTES.md`).
+
+OT0 effects build HDR pairs with `tools/niagara/build_niagara.py --niagara-hdr` (build the graded twin
+from the same arguments without it). Ported layers write the game's light x `--niagara-hdr-light K` (default 1) with no
+tonemap: translucent light / alpha at opacity alpha (Blend), additive light (Add). `--overlap` is not applied, and a
+`--layer-exposure` becomes its ratio to `--exposure`. Baked layers write light / peak, drawn x peak with
+`RendererCommonValues/EmissiveScaling`; the notes give the peak and the share of light that rounds to 0 in 8 bits.
+`--bloom` stand-ins, bloom halos and refraction are left out. A boost start's `--stage-light boostN-flash` is drawn as
+light whose grade is the twin's flash (per screen row, Newton on the grade; the fade per colour channel, exact at the
+bottom row; the top of the screen within ~0.05 during the fade); screen-blended by the overlay rather than added. The
+other `--stage-light` kinds (scene dim, ground glow), `--boost-light`, `--post-process` and another Niagara game's sources stop the build
+(not converted yet). A bake that bypasses the HDR save is counted `NOT CONVERTED` in the `HDR
+SUMMARY` line. `<out-dir>/<name>.hdr.json` holds the ported layers' display transform at `--exposure` (efkmat_ot0.tm_code)
+and OT0's bloom, `--niagara-hdr-radius R` as radiusScale and the fallback (the name without `-hdr`, or
+`--niagara-hdr-fallback`). OT0's bloom (UE 5.4) is decoded from four captures of one effect, one setting:
+threshold 0, eye adaptation 1, OT2's six sizes, UE's default tints x 0.5, no tonemap bloom scale. On identical light the
+overlay mirror gives 1.02-1.05x the game's bloom energy; lens flares (0.7-1.8 %) are left out. Pilot pair in ASSEMBLER
+TEST PROJECT: 969 twin / 970 HDR (light x0.42 measured against the captures, radiusScale 1.79 measured) / 971 (light x1,
+comparison) (`out/edits/ot0-hdr-blueflame-20261026/NOTES.md`). effectjob has no `"hdr"` for the Niagara builder yet.
+
+**OT0 sets bloom per scene**, so the blue flame's setting is only the default. Decode the bloom of the battle the effect
+plays in from that battle's captures and pass it with `--niagara-hdr-bloom`:
+
+```bash
+python tools/niagara/ot0_bloom.py --store "<capture folder>/rdcdigest" --out out/edits/<task>/bloom.json
+```
+
+It reads the digest only (no replay): the setup pass's threshold and the six Gaussian passes' filter weights, as above.
+It exits 1 when the store's captures disagree (pick the battle's with `--capture`). The `HDR SUMMARY` line names the
+bloom file, or says the default was used.
+
+Coverage is implemented as an optional composite `display(hdr) + scene * (1 - alpha)`, but **screen blending is the
+default**. In the shipped RPGReactor runtime, an additive fixture used
+`blendFuncSeparate(SRC_ALPHA, ONE, ONE, ONE)` and wrote alpha 1 despite having no occluding coverage; translucent
+alpha also uses an additive destination term. Thus target alpha is not a reliable coverage union. The debug fixture
+readback confirms alpha 1; enabling `coverage` can darken the scene incorrectly. Correct mixed-blend coverage would
+need a separate coverage render with controlled alpha blend states, which is not implemented.
+
+Resize disposes and recreates targets/programs lazily on the next HDR draw; context restoration invalidates them too.
+The engine stops active effects when its WebGL context is lost. An unavailable/lost context cannot display either
+twin; subsequent plays select fallback until a usable target exists. In-scene 3D effects are outside this overlay path.
+A future refraction twin can contain only refracting nodes and play as a separate ordinary animation with matched
+transform, speed, start delay and lifetime, before the HDR group. It cannot be obtained by filtering nodes during an
+Effekseer draw; no automatic refraction-twin authoring/playback is included.
+
+Tests: `python tools/cascade/test_ot2port.py --work <folder>` and
+`python tools/ingame/test_hdr_overlay.py --work <fresh folder> --project <project> --port <own port>`.
+The plugin test uses an override, a small HDR fixture, a fixed in-memory scene canvas/target, random seed and identical non-MSAA WebGL1 contexts, and
+`tools/ingame/compare.js --threshold 0` to check vanilla animation pixels. It writes no project files.
+`node tools/ingame/test_hdr_overlay_unit.js` covers loader/cache/fail-closed control flow.
+`tools/ingame/run.js --headed` runs measurements in a visible Chrome app window; keep it visible and foreground.
+Debug-only `REACTOR_HDR.probeScale`/`probeFrame` records quantized HDR lower bounds through an RGBA8 staging target;
+`measureGpu` records synchronized post-pass wall times. Those readbacks/finishes are excluded from ordinary playback.
+
 ## Battle effect preload plugin
 
 `plugins/ReactorEffectPreload.js` is an RPGReactor plugin. When a battle scene
@@ -1924,6 +2255,20 @@ commands in the troop's events, and any IDs listed in `extraIds`. The engine's
 after they load (behind the transition) instead of the first cast freezing.
 `maxWaitMs` (default 3000) caps the wait. Effects stay cached until the next map
 transfer clears them.
+
+Since RPG Reactor runtime 20261027.3 a screen animation plays inside PIXI's scene, in
+the in-scene layer's own Effekseer context (`Sprite_Animation.SceneLayer`), and its
+cast never reads `EffectManager._cache`. The plugin then loads through
+`SceneLayer.preload` (what the engine's own `EffectManager.preload` does), and those
+effects stay loaded for the session. Before 2026-10-28 the plugin still loaded into
+the overlay context, so on that runtime it preloaded nothing a cast used (the first
+cast froze as without it, and `run.js --preload-id` failed). The overlay path is
+unchanged for older runtimes and for `Graphics.effekseerInScene = false`. The engine
+itself now also loads a map's effects with the map (`EffectManager.preloadWithMap`);
+the plugin still covers what that list leaves out (battle items, the troop's battle
+event commands, skills past the twelfth an actor or enemy has, `extraIds`).
+Measured 2026-10-28 with `--preload-id` in ASSEMBLER TEST PROJECT: anims 3 and 998
+were loaded before the cast on both paths, freeze 6 ms (998 uncovered: load ~600 ms).
 
 Install: copy it into a project's `js/plugins/` and add an entry to `$plugins` in
 `js/reactor_plugins.js` (`"name": "ReactorEffectPreload", "status": true`, plus
@@ -2167,7 +2512,7 @@ mesh-space bind positions; joint transforms are metadata, not applied motion.
 `--bake` (animated models baked to multi-frame v5) is not implemented yet and
 refuses. Height/displacement, FBX, and OBJ are outside scope.
 
-`--diameter` defaults to 2, measured on the longest dimension. `--scale S` multiplies source units by S instead (a GLB in metres at 0.025 units per cm is `--scale 2.5`), and `--keep-origin` keeps the source pivot instead of centring on the bounds: a game mesh that grows from its base (a twist column) must keep it. Select body
+`--diameter` defaults to 2, measured on the longest dimension. `--scale S` multiplies source units by S instead (a GLB in metres at 0.025 units per cm is `--scale 2.5`), and `--keep-origin` keeps the source pivot instead of centring on the bounds: a game mesh that grows from its base (a twist column) must keep it. `--uv2-centre CM_PER_UNIT` (40 at `--scale 2.5`) writes an Effekseer 1.8 model (version 6; the 1.70 runtime reads up to 5) whose UV2 holds each vertex's offset from the origin in Unreal cm, as (|x|, |(y, z)|) in Unreal axes: a material then measures the distance to the particle's centre from it and the particle's size, which Effekseer gives no model's pixel stage. The builder's pre-rotation and bent-normal copies take these models too and recompute UV2 after turning them. Select body
 materials with `--fit-sections A,B` to exclude fragments from the fit.
 `--lod low.glb` uses that geometry with the main GLB's center and scale.
 `--rotate-x`, `--rotate-y`, and `--rotate-z` take degrees, applied in that
@@ -2340,15 +2685,286 @@ still written and names the reason — and 2 for a usage error, no matching
 input, or a refused output folder (nothing is written). Tests:
 `tools/assetinspect/test_assetinspect.py` (§ Testing).
 
+## Studying a Unity (Shuriken) effect
+
+`tools/unity/` is the Unity front end: it reads particle prefabs (Shuriken `ParticleSystem`) from a Unity game and
+writes per-prefab summaries in the inspector's units, the counterpart of `tools/niagara/niagara_summary.py`. It is
+built for Studio's games (Unity game A on Unity 2020.3.48f1, Unity game B on
+6000.0.64f1, per the Studio modding wiki) but knows no game: field names are Unity's own. No Effekseer builder
+exists yet (see the end of this section).
+
+```bash
+# Unity game B: which blueprints use which FX prefab (stream-reads the modding template, never unpacks it)
+python tools/unity/fx_reference_index.py --game "<Unity game B folder>" [--bundle-map AssetToBundle_RT.txt] \
+    [--field FxPrefab --field <other FieldName>] [--query plasma] [--save-cache <work>/cache.json] --out <work>/fx.csv
+# find and dump prefabs straight from the bundles (UnityPy: pip install UnityPy)
+python tools/unity/unity_dump.py --bundles "<game>/Bundles" --out <work>/index          # cab_index.csv
+python tools/unity/unity_dump.py "FX*" --bundles "<game>/Bundles" --out <work>/list --list
+python tools/unity/unity_dump.py <bundle> --cab-index <work>/index/cab_index.csv --bundles "<game>/Bundles" \
+    --out <work>/dump --container "<prefab path regex>" [--export-textures] [--export-meshes]
+# summarise dumps and/or an AssetRipper export's .prefab files
+python tools/unity/shuriken_summary.py <work>/dump ["<AssetRipper export>/Assets/FX"] --out <work>/summary \
+    [--assets "<AssetRipper export>"]
+python tools/unity/test_unity.py --work out/tests/unity
+```
+
+- `unityfx.ps1` runs those steps on Windows for `-Game RT` or `-Game WOTR` from the folder it is saved in (the five
+  `.py` files beside it; nothing else from the repository is needed): Unity game B's FX index, the bundle index,
+  the prefab list, and with `-Container <text>` (plus `-Bundle` for Unity game A) a dump and its summaries, all under
+  `-Out` (default `D:\UnityFX-out\rt` / `\wotr`). It skips a step whose output exists, so it resumes after an
+  interruption, and exits 1 when a step failed. Run it as
+  `powershell -ExecutionPolicy Bypass -File unityfx.ps1 -Game RT`. Pasting the commands one by one merged lines
+  more than once; the script avoids that.
+- `fx_reference_index.py` (standard library) reads `Assets/ModTemplateCaches/BlueprintUnityObjectReferences.json`
+  out of `Modding/WhRtModificationTemplate.tar` (or a loose copy with `--json`) and writes one CSV row per reference
+  (`BlueprintName`, `BlueprintGuid`, `FieldName`, `ObjectPath`, `Guid`, `FileId`, `ScriptGuid`, `ScriptFileId`),
+  sorted by blueprint, and beside it `<out>_prefabs.csv`, one row per prefab, most used first (category = the folder
+  under `Prefabs/`, how many blueprints use it with examples, and `Container`, the text to give `-Container`). Unity
+  game B 1.6: 1111 references (146 exact duplicate rows) name 186 prefabs. It prints every `FieldName` in the cache with its count, so other fields that hold effects
+  can be found and added with `--field`. `--bundle-map` joins a community `GUID:bundle` map (tab, comma, `=` or
+  space instead of the colon are accepted too) into `CandidateBundle`, with `MappingStatus` `historical-map-match`,
+  `not-in-provided-map` or `no-map-provided`. Such a map was made for an older build, so a match names a candidate
+  bundle, not a fact. Started from the user's `fx_reference_index.py`; all of its options and outputs are kept.
+- `unity_dump.py` loads the given bundles with UnityPy. An input holding `*`, `?` or `[` is a pattern over the file
+  names in its folder (`--bundles` when it names none), ignoring case: PowerShell does not expand it. Unity game B
+  keeps its effects in one `FX` bundle; Unity game A has a main `FX` bundle and many FX bundles with descriptive names,
+  hence `"FX*"`. `--list` loads one bundle at a time, freeing each before the next, and writes `containers.csv`
+  (bundle, container path, class, serialized file, path id); it prints each bundle's entry and GameObject counts. A dump takes roots by container path (`--container`), root GameObject name (`--name`)
+  or `CAB-name:pathID` (`--path-id`, any object). It writes each root's whole hierarchy and its components in
+  full, the Materials and MonoScripts they use in full, and everything else they reference trimmed to its name and
+  header fields (texture size and format, mesh vertex count, shader name). It never writes pixel or vertex data:
+  `--export-textures`/`--export-meshes` save those as PNG/OBJ instead. An OBJ is UnityPy's export with X negated
+  (positions and normals; Unity is left-handed): negate x and nx back before using a mesh in Unity coordinates (an
+  emitter mesh's normals otherwise point the mirrored way; a Unity study effect's blades flew against their orbit). Its first
+  line and the record's `obj_mirror: "x"` say so. References name the files inside other
+  bundles (`CAB-<hash>`), not bundle file names. So `--bundles <folder>` first reads every bundle's directory from
+  its header (nothing decompressed but that small block; checked against UnityPy on real bundles and on every
+  header layout: blocks info after the header or at the end, LZ4/LZMA/none, 16-byte alignment from header
+  version 7 or Unity 2019.4.15) into `cab_index.csv`. A dump then loads, round by round, the bundles its
+  unresolved references point into. An input given by bare name is looked up in `--bundles` too. What still
+  cannot be resolved stays as `unresolved: <file>:<path id>`; `unresolved_not_in_index` names the files no
+  bundle holds (Unity's built-in resources are in `<game>_Data`). An object whose typetree does not read is
+  listed under `errors` (a MonoBehaviour without script typetrees keeps its head) and the exit status is 1. Never
+  load a whole Bundles folder: UnityPy decompresses every bundle it loads, and Unity game A's ~40 GB of interdependent
+  bundles have exhausted memory when loaded whole.
+- `shuriken_summary.py` reads Unity YAML (`--- !u!<class> &<id>` documents, as AssetRipper exports and Unity saves)
+  or the dump JSON, and gives the same summary from both (the tests build one prefab both ways and compare). For
+  YAML, `--assets` folders resolve guids through their `.meta` files: materials (`.mat`), textures, shader names
+  (from the `.shader` file's first `Shader "..."` line) and script names (the `.cs` file). Per prefab:
+  - the hierarchy, with each GameObject's components (MonoBehaviours by script class), active flag and transform
+    (Euler angles in Unity's Z-X-Y order);
+  - per ParticleSystem, every enabled module with every field decoded: curves as their mode, keys and 11 samples of
+    the min..max range, gradients as their keys, enums by name. InitialModule counts as enabled always (Unity
+    always runs it). Also: disabled modules, the renderer (mode, alignment, materials, meshes), sub-emitters by
+    path (trigger type, inherited properties), and timing: particles per cycle from rate and bursts, last spawn,
+    and the end of a one-shot (largest delay + last spawn + longest life; sub-emitters and simulation speed are
+    not counted in it);
+  - materials: shader, textures with tiling, floats, colours, keywords, render queue and tags. When the shader
+    exposes `_SrcBlend`/`_DstBlend`, the blend is named from those factors (additive, alpha blend, premultiplied,
+    multiply...). Nothing about blending is inferred from shader or material names;
+  - every other component (Studio's own controllers, locators) with its stored fields.
+  `census.md` counts modules, render modes, alignments, shapes, simulation spaces, curve modes, blends, shaders and
+  component classes over all inputs: use it to choose which features a builder must cover first.
+
+Serialized conventions, taken from Unity's own code rather than from memory: field layouts from the type trees UnityPy
+ships (AssetRipper's database, `ParticleSystem` 198 and `ParticleSystemRenderer` 199, compared for 2020.3.48f1 and
+6000.0.64f1: Unity 6 adds a gradient `m_ColorSpace`, `emitterVelocityMode`, `gravitySource` and the trail's
+`textureScale`, and removes `useRigidbodyForVelocity`). Enum values come from UnityCsReference
+`Modules/ParticleSystem/Managed/ParticleSystemEnums.cs`, and unit remaps from its particle inspector
+(`Modules/ParticleSystemEditor`):
+- start rotation and rotation over lifetime/by speed are stored in **radians** (the inspector multiplies them by
+  Rad2Deg); the summary gives degrees and degrees/s. Shape `angle`, `arc` and `m_Rotation` are stored in degrees;
+- frame over time and start frame are stored as a **fraction of the sheet** (the inspector multiplies by tilesX for a
+  SingleRow animation, else tilesX x tilesY, or the sprite count); the summary gives frames;
+- a MinMaxCurve's curve modes are the stored curve times `scalar`; two constants are `minScalar`..`scalar`;
+- particle curves run over normalised life, except InitialModule and EmissionModule curves (over the emitter's
+  duration) and the *BySpeed modules (over their speed range). The summary states the axis per curve.
+
+Not verified against a running Unity: a `Fixed` gradient is read as the colour of the first key at or after t;
+`PerceptualBlend` mixes in Oklab with the keys taken as sRGB; weighted keys are solved as cubic Beziers with the
+stored weights. None of this has been run on Studio's own files yet. Studio's official template says their shaders
+are custom (not Unity's built-ins), so a material's look will need its shader read or a RenderDoc capture
+(§ The capture side below; both games run on Direct3D 11, so DXBC).
+
+### The capture side: `unity_rdc.py`
+
+The bundle side gives what the prefab says; a RenderDoc capture gives what the game drew with it (Studio's shaders
+are custom, so the look needs the capture). `tools/unity/unity_rdc.py` runs the first three steps on one capture
+folder (one that holds `.rdc` files):
+
+```bash
+python tools/unity/unity_rdc.py "C:/Program Files (x86)/Steam/steamapps/common/Unity Game A/Renderdoc/breatheffect"
+python tools/unity/unity_rdc.py "C:/Program Files (x86)/Steam/steamapps/common/Unity Game B/Renderdpc"
+python tools/unity/unity_rdc.py "<folder>" --skip-digest --overwrite --work <same work folder>   # redo the analysis only
+python tools/unity/test_unity_rdc.py --work out/tests/unity-rdc
+```
+
+1. Every video in the folder becomes `frames-1fps-<video>/<second>.png` beside it (ffmpeg on `PATH`
+   or `--ffmpeg`), plus a contact sheet labelled with second and frame in `<work>/footage/`.
+2. `rdcdigest digest` of every `.rdc` into `<folder>/rdcdigest/`, with the exact options of
+   § Digesting RenderDoc captures (`--quick` for the default digest; `--renderdoc <dir>` when RenderDoc
+   1.46 is not at the default path). Captures already digested are skipped.
+3. The analysis, in `<work>` (default `out/edits/<game>-<folder>-<yyyymmdd>/`, `<game>` `wotr` or `rt`
+   from the folder's path, else `unity`; an existing folder needs `--overwrite`): `REPORT.md`, `layers.json`
+   and `view.html`. Kept scene draws (blended, marked or listed, with a depth target, so not post) are
+   grouped into layers by shaders, textures and blend. Layers writing the scene colour target (the one most
+   non-UI scene draws write) are ranked by the light they add to it (sum of |dRGB| of their contributions on that
+   target). Layers writing another target (a refraction or blur mask, a glow buffer) are listed apart under "Side
+   targets" with their change, and with every later draw that reads the target, kept or not, and its shader. UI
+   draws are left out of the ranking: a draw reading a UI texture (sprite atlases, TextMeshPro atlases,
+   portraits, `UnityWhite`, `UI_*`; `--ui-re`), or sharing the shader pair of one that does. Per layer: blend,
+   depth and cull state, targets by id and name, every texture as PNG (and its alpha when not flat; dynamic scene
+   textures are named, e.g. `_CameraDepthTexture` for soft particles), the material's named cbuffer values (when
+   the shaders kept reflection names; `unity_*` globals and matrices are left out; values that differ per draw are
+   listed per draw; WotR's shaders keep none, so `draw <capture> <eid> --cbuffers` gives the raw rows) and the
+   shaders' disassembly. Per draw: each contribution as an image, and the particles: Unity billboards found by
+   their 6-index quads, instances, or mesh copies (Unity batches mesh particles as one mesh repeated in one draw,
+   each copy's vertices after the last): count, screen size and spread from the post-VS output, and the
+   per-particle vertex inputs (`COLOR` is Unity's start colour x colour over lifetime at this frame: a
+   billboard's first vertex, a mesh copy's brightest), with a CSV per draw. A draw that is none of these gets its
+   vertex inputs' range over the vertices it uses (meshes carry their colour in `COLOR` too). The report names the
+   capture and eid of every value. Its **Capture clock** section gives each capture's Unity `_Time.y`, as the kept
+   scene draws read it: by name, or else the first constant row shaped (t/20, t, 2t, 3t). WotR and Unity game B keep
+   no names, and both put a second clock of that shape a few rows later, which is not `_Time`. The section also gives
+   the 60 fps frame each capture falls on and the game's frame rate between captures. **A capture's frame number
+   counts rendered frames, not 60 fps frames**: WotR's a Unity study effect captures ran at ~51 fps. r16-r19d placed
+   every capture by its frame number, so each check compared the build at the wrong moment, except the one capture
+   it was anchored on.
+
+**Unity captures look upside down in RenderDoc**, and the script turns them upright. On D3D Unity uploads
+imported textures bottom row first (its UV v = 0 is the image's bottom) and flips its projection while it draws
+into a render texture, which every scene draw does (only the final blit reaches the swap chain, so `final.png` is
+upright). Texture PNGs are flipped; each draw's contribution image and box, and its particles' y, are flipped
+when the draw's `_ProjectionParams.x` is -1 (Unity's own flag for a flipped projection; a draw without the name
+is taken as flipped), and the report's `orientation` line says which. `--no-flip` keeps everything as stored.
+UnityPy flips its texture images the same way by default (`flip=True` in its `Texture2DConverter`, 1.25.4), so
+`unity_dump.py --export-textures` PNGs and these compare directly, and both are the right way up for
+Effekseer's top-left UV origin.
+
+**What the first real run (2026-10-24) got wrong, fixed since:** `final.png` was black
+(a D3D11 flip-model swap chain: the frame is drawn into one buffer, the Present names the other; § Digesting
+RenderDoc captures; a digest made before the fix gets the scene target after its last kept draw instead, with a
+note, until `digest --final-only` redoes it); the breath's refraction-mask writes (B = 10, the mask's "on"
+flag) ranked as the three brightest layers and the composite that reads the mask appeared nowhere; 171 HUD draws
+(the HUD is drawn into the scene target with depth bound) ranked as particles; 3-copy mesh-particle batches
+counted as one particle; meshes showed no `COLOR`; the summary table named textures `texture0...`; and Unity's
+RGB9E5 GI texture failed to decode.
+
+**Porting a Unity effect to Effekseer: conventions measured on WotR's a Unity study effect** (2026-10-28/29;
+a task report, whose task-local builder is where these live until a
+`tools/unity` builder exists). Each was a visible error before it was measured:
+- **Texture V:** Unity counts V from the image's bottom and Effekseer from the top. Build the game's UV as
+  `(u, 1 - v)` from Effekseer's UV, and flip once more where the texture is sampled. Flipping only the UV input
+  scrolled the right way but sampled mirrored: the sigil's kaleidoscope showed other panes and other colours.
+- **Shader clock:** a scrolling texture's phase is rate x `_Time`, and `_Time` was ~50 s into the game (Capture clock
+  above). Fold rate x `_Time` at the effect's start into each scroll's constant offset; starting from 0 drew another
+  part of the texture.
+- **Y rotation turns the other way:** Effekseer's rotation about Y runs opposite to Unity's (the sigil turned
+  backwards and stood 28 deg off). Unity particle meshes are baked into world space in the capture. A rigid fit of the
+  captured vertices to the mesh gives the exact rotation, scale and place. The vertex alpha, read against the
+  colour-over-life curve, dates each particle's birth.
+- **Mirrors:** `unity_dump.py` OBJ meshes are X-mirrored (above). Points taken from the prefab in Unity's own frame
+  (smoke locators) then come out Z-mirrored against the mirrored mesh: check one against the capture.
+- **A material's depth offset only moves the depth test:** Studio's cb0[15].y shifts the depth compare and does not
+  move the particle. As Effekseer `DepthValues/DepthOffset` it moves the particle toward the camera and draws it
+  d/(d - offset) larger, unless `DepthValues/IsScaleChangedDependingOnDepthOffset` is on. Rays at 9.4 were 7.6x and
+  cut by the near plane. Cascade's CameraOffset does move the particle, so this applies to Unity ports only.
+- **Measure a Blend layer over the target as it stood just before its draw:** the game's draw lands on scene fog,
+  smoke and the effect's own earlier layers, which RPGReactor does not have. The backdrop is the target before the
+  first kept draw plus every earlier draw's digest contribution. Fitted over the bare scene, a smoke disc came out
+  yellow-green from the fog under it.
+- **HDR: the light an Studio particle writes is its gamma value** (2026-10-31, a task
+  report). The particle pixel shaders multiply the texture in gamma space by the vertex colour and
+  the material's HDR scale, decode to linear only for the cloud shadow, then encode back to gamma before fog,
+  multiply by alpha and clamp with cb[15].x (RT 58125a21: decode l.58-65, encode l.82-88, write l.192-194; the same
+  in all 14 of one effect's shaders and WotR's dc506748 / 7aa9389f / 44744f9c). The float scene target therefore holds
+  the gamma number, and that is what the game's tonemapper and bloom read. An HDR port (§ HDR effect overlay) outputs
+  that value undecoded, its clamp included. The task builders decoded it: one impact, 1060, was 3.6-11x the
+  game's per-pixel light per layer (a white blob, deep-blue swirls), and another build, 1039, drew a wide white-lavender
+  ray instead of a narrow gold one. 1039 / 1040 / 1042 / 1060 were retired and rebuilt as 1075-1078. Measured
+  through a linear probe sidecar (grade `hdr / 8`, bloom off; the overlay screens it, so hdr = 8 (out - bg) /
+  (1 - bg) over a capture with the effect moved off-screen), against the game's per-draw contributions. Those are
+  net (premultiplied blending subtracts alpha x the scene behind), so faint layers over a bright beam read low on
+  the game's side.
+
+**On Windows without the repo**: `python tools/unity/pack.py` zips both sides from the current files into
+`out/unity/unityfx-bundle.zip`: `unityfx.ps1` with its five `.py` files, `unity_rdc.py` with `run_rdc.bat` and
+the six `tools/rdcdigest` modules (in `rdc_tools/`), `README-unity.txt`, and the commit in `VERSION.txt`.
+Unzipped anywhere, `run_rdc.bat "<folder>"` analyses a capture folder, or every subfolder holding `.rdc` files
+when given a folder of them (Unity game A's `Renderdoc`), and writes to `<capture folder's parent>/_analysis/`.
+Repack after a change to `tools/unity` or `tools/rdcdigest` rather than editing the bundled copies.
+
+Next, for a builder (none of this exists yet): run the census over the FX prefabs first, then map the most-used
+modules: start lifetime to life, rate and bursts to generation (one interval per node, as the Cascade reader
+already handles), shape to generation location, start speed along the shape normal plus gravity and force to
+motion, size/colour/rotation over lifetime to easing or curves, the texture sheet to UV animation, and render mode
+to sprite, ribbon or model.
+
+## Frames from a video
+
+There is no ffmpeg on this machine since 2026-11-07 (the copy older notes name, under
+`out/edits/ot2-recovery-video-20261009/scratch/pylib/`, was swept). `tools/video/vidframes.js` takes frames in headless
+Chrome instead, which decodes the game clips (H.264 MP4, WebM):
+
+```bash
+node tools/video/vidframes.js "<video>" "<capture folder>/frames-1fps-<video name>" 1          # one frame a second
+node tools/video/vidframes.js "<video>" out/edits/<task>/footage/dense 1.5,1.6,1.7 --width 384  # chosen times
+```
+
+It seeks to each time, draws the frame `--width` px wide (default 640) and writes `s<seconds>_f<frame>.png`
+(frame = round(t x fps)) and `meta.json` (duration, fps, size). fps is read from the playing video's frame
+callbacks, so it can differ from the container's by a fraction (59.80 and 60.08 on the same 60 fps clip): take the
+container's rate when it matters. Chrome: `--chrome`, `N2E_CHROME`, the Windows install, or Playwright's Chromium,
+as `tools/ingame/run.js`. `--port` (default 8831) for the page it serves; it kills only the Chrome it starts. The
+contact sheet is a few lines of Pillow. `unity_rdc.py`'s first
+step and the preview skill's `footage` still call ffmpeg: give them `--ffmpeg` with one, or use this.
+
+## Reading IoStore containers
+
+`tools/iostore/iostore.py` reads UE 5.x IoStore containers (`.utoc` + `.ucas`) directly: the table of contents, the
+directory index and chunk reads, Oodle blocks through the Oodle DLL (`N2E_OODLE`, default the FModel copy
+`F:/FMODEL/oo2core_9_win64.dll`; Windows only), uncompressed blocks anywhere. Unencrypted containers only. `tools/iostore/stringtable.py` scans a cooked StringTable package in one for its key/value
+pairs: one study game's skill names (`ST_SkillName`, 1,160 pairs) are not in the FModel export, so a skill named by the user is
+found this way.
+
+```bash
+python tools/iostore/iostore.py list "<Paks>/MyGame-Windows.utoc" ST_Skill
+python tools/iostore/iostore.py extract "<Paks>/MyGame-Windows.utoc" ST_SkillName.uasset --out out/edits/<task>/pak
+PYTHONIOENCODING=utf-8 python tools/iostore/stringtable.py "<Paks>/MyGame-Windows.utoc" ST_SkillName.uasset "スキルアルファ"
+python tools/iostore/test_iostore.py --work out/tests/iostore      # a synthetic container, no game data
+```
+
+Both scripts were first written in task folders
+(a shader-library extraction, 2026-10-18; skill names, 2026-11-01) and moved here after the 2026-11-07
+sweep deleted those folders. The string scan is a heuristic (an FString whose text looks like a key, letters then a
+digit, followed by another FString): a table whose keys do not look like that needs another reading.
+
 ## Digesting RenderDoc captures
 
 `tools/rdcdigest/rdcdigest.py` opens each `.rdc` once in headless qrenderdoc
 (`rd_digest.py`, RenderDoc 1.46; `--renderdoc <dir>` or `RENDERDOC_DIR`) and
-writes what effect work reads from captures into a store (default
-`out/rdcdigest/`), so later tasks query the store instead of replaying a
-0.4-1.3 GB capture with their own script. Captures are only read.
+writes what effect work reads from captures into a store, so later tasks query
+the store instead of replaying a 0.4-1.3 GB capture with their own script.
+Captures are only read.
+
+`rdcdigest.py clock [-c ID] [--offset B] [--cast-gap S] [--find] [--json]` reads the game clock from each capture's
+UE View buffer, for dating captures: the time between them, and which belong to one cast (a step over `--cast-gap`,
+default 3 s, starts a new one). A capture's frame number does not convert to time (85, 67 and 115 "fps" within one
+BD2 cast). The default offset 2136 is UE 4.23 (BD2), where differences match particle-age differences to about 1 ms;
+for another engine, `--find` lists the floats that rise through the captures, so check a candidate against known ages.
+
+**The store lives beside the captures:** `<folder of the .rdc>/rdcdigest/`, one
+per capture folder (the user's rule, 2026-10-19). Pass it as `--store` to every
+command, `digest` included; the default `out/rdcdigest/` is only for tests. A
+store is self-contained (manifests hold no store path), and blobs are shared
+inside one store only. Before replaying a `.rdc`, look for its folder's
+`rdcdigest/`: all 170 OT0, OT2, BD2 and TS captures have one (list, audit and
+sizes: `out/edits/rdc-digest-v2-all-20261019/REPORT.md`; shader lists
+`out/edits/rdc-digest-all-20261019/pslist_{bd2,ot0,ot2}.txt`, TS
+`out/edits/ts-prep-20261015/shaders/ShaderIndex.csv`).
 
 ```bash
+python tools/rdcdigest/rdcdigest.py --store "<capture folder>/rdcdigest" <command> ...   # every command below
 python tools/rdcdigest/rdcdigest.py digest <capture.rdc | folder>... [--ps-list ShaderIndex.csv] [--all]
 python tools/rdcdigest/rdcdigest.py draws --kept --blend additive        # or --shader / --texture / --marker / --target
 python tools/rdcdigest/rdcdigest.py draw <capture id> <eid> [--cbuffers] [--json]
@@ -2358,6 +2974,7 @@ python tools/rdcdigest/rdcdigest.py postvs <capture id> <eid> [--attr TEXCOORD1]
 python tools/rdcdigest/rdcdigest.py dynamic <capture id>                  # scene colour/depth etc. kept draws read
 python tools/rdcdigest/rdcdigest.py exposure <capture id>                 # 1x1 targets (eye adaptation) per write
 python tools/rdcdigest/rdcdigest.py gpu <capture id> [--kept] [--top N]
+python tools/rdcdigest/rdcdigest.py niagara <capture id> <eid> [--screen] [--attr dyn1] [--csv out.csv]   # a Niagara draw's particles
 python tools/rdcdigest/rdcdigest.py stats                                 # store size, blobs shared across captures
 ```
 
@@ -2372,7 +2989,9 @@ vertex/index ranges the draw reads, and `gpu_us`. `final.png` is the swap buffer
 the frame's last Present shows: a flip-model swap chain (D3D12) has two or three and presents a different one each
 frame, so the buffer is the one the Present action names (until 2026-10-19 the first swap buffer was saved, a stale
 image on all 50 OT0 captures; `digest --final-only` redoes just `final.png` and the manifest's `final` of a digested
-capture, about 20 s each). Every capture so far presents an R10G10B10A2 swap chain, which `final.png` rounds to
+capture, about 20 s each). The named buffer counts only when the frame wrote it before the Present: a D3D11
+flip-model chain (Unity, WotR) draws the frame into buffer 457 while its Present names 458 as copy destination,
+and saving 458 gave a black `final.png` (before 2026-10-24); then the swap buffer written last wins. Every capture so far presents an R10G10B10A2 swap chain, which `final.png` rounds to
 8 bits; since 2026-10-20 `final.dds` beside it keeps the buffer's exact bits. `rt/` holds each colour target the kept draws write while depth
 tested (effect passes, not UI or post) before the first and after the last of
 them, as a PNG (8-bit, clamped) and a ZIP-compressed EXR with the exact values
@@ -2433,6 +3052,10 @@ Digest version 2 adds, each on by default and recorded in `options`:
 - **GPU time** (`--no-counters`): `gpu_us` per event from `EventGPUDuration`.
   This is the replay machine (this PC's GPU under RenderDoc replay, one event at
   a time), not the game's frame timing; the manifest's `gpu` names the GPU.
+  D3D12 captures (OT0) get none: the counter is offered but returns no results.
+  Counters are fetched after every readback, because on D3D12 `FetchCounters`
+  leaves the replay unable to read textures back (before 3c337d3 the OT0 digests
+  silently lost every target dump and `final.png`).
 - **`--rehash`** (off): hash a texture SRV at every use, not only the first, and
   store each new version for kept draws. Without it, an SRV whose texture
   RenderDoc's usage shows written since its first hash (CPU write, copy) is
@@ -2464,7 +3087,10 @@ Vertex blobs hold only the elements the draw reads: element 0 is
 per-instance slots start at `instance_offset`. Index blobs hold the draw's own
 indices. Stripped shaders (UE cooks) have reflection names like `cb0_v3`; for
 those only the raw bytes are kept, and `draw --cbuffers` prints them as float4
-rows, or uint rows when they look like integers.
+rows, or uint rows when they look like integers. On D3D12 a root constant buffer
+has no size (RenderDoc reports the rest of UE's 4 MB upload heap), so it is read
+at the shader's reflected block size, at most 64 KB without reflection; before
+3c337d3 this made 3.6 GB manifests.
 
 `texture --png` decodes with Pillow: identical to RenderDoc for BC7 and 8-bit
 formats, but its BC1/BC4 decode differs from RenderDoc's by up to 6 levels.
@@ -2573,7 +3199,11 @@ mips, UI, post), data of draws that were not kept (hashed only; rerun with
 `--all` or a wider `--ps-list`), buffer SRVs over 64 MB, MSAA targets, and any
 question nobody anticipated. Pilot numbers (TS portal captures):
 `out/edits/rdc-digest-pilot-20261019/REPORT.md` (v1) and
-`out/edits/rdcdigest-v2-20261019/REPORT.md` (v2).
+`out/edits/rdcdigest-v2-20261019/REPORT.md` (v2). The full v2 run (170
+captures plus 2 byte-identical copies, 132 GB of `.rdc` -> 28.4 GB of stores, 21.5 %; 79 s per capture,
+OT0 122 s) and its audit of every store: `out/edits/rdc-digest-v2-all-20261019/REPORT.md`.
+Most of a store is full-resolution float images: target dumps, dynamic
+snapshots and contributions are 87 % of it.
 
 ## Unreal readers
 
