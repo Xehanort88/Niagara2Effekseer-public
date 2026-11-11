@@ -79,7 +79,25 @@ def read_notes(work, name):
         return None, None
     lines = f.read_text(encoding='utf-8').splitlines()
     built = [x.strip() for x in lines[0][len('built:'):].split(',') if x.strip()] if lines and lines[0].startswith('built:') else []
-    return built, lines[1:]
+    port = f.with_name(name + '.port.txt')          # the TS kit's intended skips, as check_build reads them
+    return built, lines[1:] + (CB.ts_port_notes(port.read_text(encoding='utf-8').splitlines()) if port.is_file() else [])
+
+
+RESIZED_NOTE = re.compile(r'^(.+?): RESIZED x([0-9.]+): (.*)$')
+
+
+def resized_layers(m, work):
+    """Layers the builder drew smaller than the source (--size-cap): (build, layer, factor, why), once each. A complete
+    ledger says nothing about their size, and a UE 4.23 study effect's swirls and beam went unnoticed at x0.43 for three rounds."""
+    out, seen = [], set()
+    for s in m['systems']:
+        for b in s['builds']:
+            for line in read_notes(work, b['name'])[1] or []:
+                hit = RESIZED_NOTE.match(line)
+                if hit and (b['name'], hit.group(1)) not in seen:
+                    seen.add((b['name'], hit.group(1)))
+                    out.append((b['name'], hit.group(1), float(hit.group(2)), hit.group(3)))
+    return out
 
 
 def host_index(m):
@@ -154,20 +172,25 @@ def build_rows(m, variant, work, pre):
         for q in seq:
             hit = [s for s in m['systems'] if (s.get('actor') == q['binding'] if (m.get('sequence') or {}).get('format')=='ue5' else Path(str(s['source'])).stem == q['stem'])]
             if hit:
-                seq_of[hit[0]['id']] = q
+                for s in hit:
+                    seq_of[s['id']] = q
                 continue
-            skip = ((m.get('sequence') or {}).get('skip') or {}).get(q['stem'])
+            skips = (m.get('sequence') or {}).get('skip') or {}
+            # by system stem, or by binding name for an actor with no asset of its own (director SetAsset)
+            skip = skips.get(q['stem']) or skips.get(q.get('binding'))
             c = cell('explained', 'in the sequence, left out: %s' % skip) if skip else \
                 cell('gap', 'the sequence plays %s (trigger %s s) but the manifest lists no such system'
-                     % (q['stem'], ', '.join('%g' % t for t in q['triggers']) or '?'))
-            rows.append({'key': q['stem'] + '/*', 'system': q['stem'], 'index': None, 'emitter': '*', 'kind': 'system',
+                     % (q['stem'] or q.get('binding'), ', '.join('%g' % t for t in q['triggers']) or '?'))
+            name = q['stem'] or q.get('binding')
+            rows.append({'key': name + '/*', 'system': name, 'index': None, 'emitter': '*', 'kind': 'system',
                          'cells': dict({k: cell('na') for k in COLUMNS}, **{'in sequence': c})})
     sys_cell = {}
     for s in m['systems']:
         q = seq_of.get(s['id'])
         used = '%g s (%d f)' % (float(s['offset_s']), int(s['offset_frames']))
         if q:
-            trig = q['triggers'][0] if q['triggers'] else None
+            act = int(s.get('activation') or 0)
+            trig = q['triggers'][act] if len(q['triggers']) > act else None
             if trig is not None and abs(trig - float(s['offset_s'])) > 1e-6:
                 c = cell('explained' if s.get('offset_reason') else 'gap',
                          'sequence trigger %g s, plays at %s: %s' % (trig, used, s.get('offset_reason') or 'no offset_reason'))
@@ -225,7 +248,12 @@ def build_rows(m, variant, work, pre):
                     built_nodes = [x for x in CB.node_of(r['name'], built)
                                    if not any(CB.node_of(n, [x]) for n in longer)]
                     skip = CB.skip_reason(r['name'], notes)
-                    primary = [n for n in built_nodes if n in (r['name'], 'evt_' + r['name'])]
+                    # build_niagara.split_renderers: <name>_r<k> is renderer k of this emitter (a UE 5.6 study effect's
+                    # Flash_8 draws one of three renderers per cast; its second was the one simulated);
+                    # split_spawn_groups: <name>_g<k> its spawn group k (Hole_HighEnd's red glow and white twin); split_particles:
+                    # <name>_p<k> its particle k (CurveAura001's 13 ribbons)
+                    primary = [n for n in built_nodes if n in (r['name'], 'evt_' + r['name'])
+                               or re.fullmatch(re.escape(r['name']) + r'(?:_r\d+)?(?:_g\d+)?(?:_p\d+)?', n)]
                     if built_nodes and len(primary) >= name_count.get(r['name'], 1):
                         c['built'] = cell('ok', '%s: %s' % (r['build'], ', '.join(dict.fromkeys(built_nodes))) +
                                           (' (x%d for %d same-named emitters)' % (len(primary), name_count[r['name']])
@@ -235,6 +263,8 @@ def build_rows(m, variant, work, pre):
                                           % (len(primary), r['name'], name_count[r['name']]))
                     elif skip:
                         c['built'] = cell('explained', ('pending recipe (Claude Code): ' if 'no recipe' in skip else 'builder skip: ') + skip)
+                    elif st == 'accepted' and MF.accepted_undrawn(r['reason']):
+                        c['built'] = cell('explained', 'accepted as undrawn: ' + r['reason'])
                     else:
                         why = [l for l in notes if l.startswith(r['name'] + ': ')
                                and re.search(r'not imported|not found|missing|not converted', l)]
@@ -307,6 +337,7 @@ def build_rows(m, variant, work, pre):
                                                                else 'differs from'))
     if inst_missing:
         job_notes += ['installed resource missing: %s %s' % x for x in inst_missing]
+    job_notes += ['RESIZED %s/%s x%.2f: %s' % x for x in resized_layers(m, work)]
     for r in rows:
         states = [v['state'] for v in r['cells'].values()]
         r['status'] = 'INCOMPLETE' if 'missing' in states else 'GAP' if 'gap' in states else 'ok'

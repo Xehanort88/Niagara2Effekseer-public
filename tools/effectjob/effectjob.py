@@ -40,6 +40,9 @@ import manifest as MF  # noqa: E402
 import preflight as PF  # noqa: E402
 
 ROOT = MF.ROOT
+if str(ROOT / 'tools') not in sys.path:
+    sys.path.append(str(ROOT / 'tools'))   # portpath
+import portpath  # noqa: E402
 
 
 def log(msg):
@@ -90,22 +93,36 @@ def do_preflight(m, task):
     return res
 
 
-def combine_spec(m, work, variant, blank):
+def combine_spec(m, work, variant, blank, files=None, name=None):
     """The combined effect's edit spec (as the round scripts' combine.py): an unused blank node 0, then one host per
-    build delayed by its system's offset_frames, the build's Root copied under it."""
+    build delayed by its system's offset_frames, the build's Root copied under it. files: {build name: file stem} to
+    combine other files of the builds in the same hosts (the HDR companions), named `name`."""
     edits = [{'node': '0', 'set': {'Name': 'UnusedBlank', 'DrawingValues/Type': 'None', 'CommonValues/Life': 1}}]
     i = 0
     for s in m['systems']:
         for b in s['builds']:
             i += 1
+            cut = s.get('cut_after_frames')
             edits.append({'node': 'root', 'add': {'file': str(blank), 'from': '0', 'name': b['name'] + '_host'},
                           'set': {'DrawingValues/Type': 'None', 'CommonValues/MaxGeneration': 1,
-                                  'CommonValues/GenerationTimeOffset': int(s['offset_frames']), 'CommonValues/Life': 1000,
-                                  'CommonValues/RemoveWhenLifeIsExtinct': False,
+                                  'CommonValues/GenerationTimeOffset': int(s['offset_frames']),
+                                  'CommonValues/Life': int(cut) if cut else 1000,
+                                  'CommonValues/RemoveWhenLifeIsExtinct': bool(cut),
                                   'CommonValues/RemoveWhenAllChildrenAreRemoved': True}})
-            edits.append({'node': str(i), 'add': {'file': str(work / 'build' / (b['name'] + '.efkefc')), 'from': '0',
-                                                  'name': 'Root'}})
-    name = m['combine']['name'].replace('{variant}', variant)
+            stem = (files or {}).get(b['name'], b['name'])
+            built = work / 'build' / (stem + '.efkefc')
+            edits.append({'node': str(i), 'add': {'file': str(built), 'from': '0', 'name': 'Root'}})
+            if cut:
+                # UE reset (SetAsset / Activate(reset) on a re-triggered actor) removes every particle at once: the host
+                # dies at the cut and every node of the build goes with it. The builds' holders never die by life
+                # (RemoveWhenLifeIsExtinct false), so the flag cannot end a layer early.
+                import ledger as L
+                nodes = L.dump_nodes(MF.TOOL_1803 if (m.get('runtime') or {}).get('efk18') else MF.TOOL_170, built)
+                if not nodes:
+                    raise RuntimeError('cut_frame: cannot read the nodes of ' + str(built))
+                for path, _ in nodes:
+                    edits.append({'node': '%d/%s' % (i, path), 'set': {'CommonValues/RemoveWhenParentIsRemoved': True}})
+    name = name or m['combine']['name'].replace('{variant}', variant)
     return name, {'source': str(blank), 'name': name, 'endFrame': int(m['combine'].get('end_frame', 240)), 'edits': edits}
 
 
@@ -113,6 +130,11 @@ def build_variant(m, task, variant, env, results):
     """Steps 2-3 for one variant. Appends result strings to results['build'][variant]; returns the final .efkefc."""
     work = task / variant
     work.mkdir(parents=True, exist_ok=True)
+    for source in (m.get('inputs') or {}).get('files') or []:
+        source = MF.path(source)
+        target = work / source.name
+        shutil.copy2(source, target)
+        log('[%s] input copy %s -> %s' % (variant, source, target))
     tool = MF.tool(m)
     fails = []
     lines = results['build'].setdefault(variant, [])
@@ -125,15 +147,17 @@ def build_variant(m, task, variant, env, results):
     for s, b, argv in MF.builds(m, variant):
         argv[0] = str(work)
         if MF.cascade_like(s):
+            undrawn = [n for n, why in (s.get('accept') or {}).items() if MF.accepted_undrawn(why)]
             cmd = ([sys.executable, '-B', str(MF.CHECK_BUILD)] + {'cascade-port': ['--port'], 'cascade-ts': ['--ts']}.get(
-                s['builder'], []) + argv)
+                s['builder'], []) + (['--accept-undrawn', ','.join(undrawn)] if undrawn else []) + argv)
         else:
             meshes = (m.get('inputs') or {}).get('meshes')
             if meshes:     # build_niagara reads <work>/mesh/Model only
                 (work / 'mesh' / 'Model').mkdir(parents=True, exist_ok=True)
                 for f in MF.path(meshes).glob('*.efkmodel'):
                     shutil.copy2(f, work / 'mesh' / 'Model' / f.name)
-            cmd = [sys.executable, '-B', str(MF.BUILDERS['niagara'])] + argv
+            # an accepted gap must not stop the build: the ledger still shows it unless the reason says "not drawn"
+            cmd = [sys.executable, '-B', str(MF.BUILDERS['niagara'])] + argv + (['--allow-incomplete'] if s.get('accept') else [])
         log('[%s] build %s (%s, %s)' % (variant, b['name'], s['id'], s['builder']))
         code, out = run_logged(cmd, work / (b['name'] + '.check.log'), env, work / 'build' / (b['name'] + '.argv.json'),
                                {'system': s['id'], 'builder': s['builder'], 'git': git_head(),
@@ -154,7 +178,9 @@ def build_variant(m, task, variant, env, results):
         if code != 0 or ' FAIL ' in ' %s ' % line.split(':')[0]:
             fails.append(b['name'])
     nb = sum(len(s['builds']) for s in m['systems'])
-    if nb == 1:
+    # one build stays standalone unless its system is cut (cut_after_frames: the sequence ends it; a UE 5.6 study effect's
+    # skill system ends 240 frames after it spawns, while its ball lives 564): only a host can cut it
+    if nb == 1 and not any(s.get('cut_after_frames') for s in m['systems']):
         final = work / 'build' / (m['systems'][0]['builds'][0]['name'] + '.efkefc')
         # Pair names also apply to standalone builds, without adding hosts that
         # would change their nodes, random sequence or standalone clock.
@@ -179,7 +205,7 @@ def build_variant(m, task, variant, env, results):
             make_blank(blank, 60, tool=tool)
         name, spec = combine_spec(m, work, variant, blank)
         spec_f = work / 'build' / (name + '.edit.json')
-        spec_f.write_text(json.dumps(spec, indent=1), encoding='utf-8')
+        spec_f.write_text(json.dumps(portpath.for_subprocess(spec), indent=1), encoding='utf-8')   # drive paths: absolute
         final = work / 'build' / (name + '.efkefc')
         code, out = run_logged(['dotnet', str(tool), 'edit', str(spec_f), str(final)], work / (name + '.edit.log'), env,
                                work / 'build' / (name + '.argv.json'), {'step': 'combine'})
@@ -189,6 +215,41 @@ def build_variant(m, task, variant, env, results):
         log('  ' + lines[-1])
         if not ok:
             fails.append('combine')
+    # hdr_companion: the builds' ordinary companions as one file beside the final effect, the same hosts and offsets
+    # (the engine plays both with one seed set, so the companion keeps every node and random of the HDR effect)
+    comp_of = {b['name']: (MF.flag_values(a_, '--hdr-companion') or [None])[-1] for _, b, a_ in MF.builds(m, variant)}
+    companion = None
+    if any(comp_of.values()):
+        companion = final.with_name(MF.companion_of(final.stem) + '.efkefc')
+        if not all(comp_of.values()):
+            lines.append('COMPANION FAIL: builds without one: %s' % ', '.join(k for k, v in comp_of.items() if not v))
+            fails.append('companion')
+        elif nb == 1:
+            src = work / 'build' / (next(iter(comp_of.values())) + '.efkefc')
+            if src.is_file() and src != companion:
+                shutil.copy2(src, companion)
+                if src.with_suffix('.edit.json').is_file():
+                    spec = json.loads(src.with_suffix('.edit.json').read_text(encoding='utf-8'))
+                    spec['name'] = companion.stem
+                    companion.with_suffix('.edit.json').write_text(json.dumps(spec, indent=1), encoding='utf-8')
+            ok = companion.is_file()
+            lines.append('COMPANION %s %s: %s' % ('PASS' if ok else 'FAIL', companion.stem,
+                                                 'byte-identical standalone companion of %s' % src.stem if ok
+                                                 else '%s not on disk' % src))
+            if not ok:
+                fails.append('companion')
+        else:
+            name, spec = combine_spec(m, work, variant, work / 'blank.efkefc', comp_of, companion.stem)
+            spec_f = companion.with_suffix('.edit.json')
+            spec_f.write_text(json.dumps(spec, indent=1), encoding='utf-8')
+            code, out = run_logged(['dotnet', str(tool), 'edit', str(spec_f), str(companion)], work / (name + '.edit.log'),
+                                   env, work / 'build' / (name + '.argv.json'), {'step': 'combine companion'})
+            verify = [l for l in out.splitlines() if l.startswith('VERIFY')]
+            ok = code == 0 and verify and verify[-1].startswith('VERIFY OK')
+            lines.append('COMPANION %s %s: %s' % ('PASS' if ok else 'FAIL', name, verify[-1] if verify else 'exit %d' % code))
+            if not ok:
+                fails.append('companion')
+        log('  ' + lines[-1])
     # A combined HDR effect must retain its metadata; differing grades cannot be flattened into one handle.
     hdr_files = [work / 'build' / (b['name'] + '.hdr.json') for s, b, _ in MF.builds(m, variant)]
     if any(p.exists() for p in hdr_files):
@@ -196,40 +257,51 @@ def build_variant(m, task, variant, env, results):
             sides = [json.loads(p.read_text(encoding='utf-8')) for p in hdr_files]
             if any((x['grade'], x['bloom']) != (sides[0]['grade'], sides[0]['bloom']) for x in sides):
                 raise ValueError('combined HDR systems require the same grade and bloom')
-            side = dict(sides[0], fallback=final.stem.removesuffix('-hdr') + '-ldr')
+            fallback = (MF.variants(m)[variant].get('hdr_fallback')
+                        or final.stem.removesuffix('-hdr') + '-ldr')
+            side = dict(sides[0], fallback=fallback.replace('{variant}', variant))
+            side.pop('companion', None)      # a build's own companion name; the final one is named below
+            comp_variant = MF.variants(m)[variant].get('hdr_companion_variant')
+            if companion:
+                side['companion'] = companion.stem
+            elif comp_variant:
+                # another variant's final effect (an ordinary build drawing the darkening: a looks variant drawn black)
+                import ledger
+                side['companion'] = ledger.final_effect(m, work, comp_variant).stem
             final.with_suffix('.hdr.json').write_text(json.dumps(side, indent=2) + '\n', encoding='utf-8')
         except (OSError, ValueError, KeyError) as ex:
             lines.append('HDR FAIL: ' + str(ex)); fails.append('hdr')
-    if final.is_file():
-        code, out = run_logged(['dotnet', str(tool), 'lint', str(final), '--strict', '--catalogue',
-                                str(ROOT / 'out/catalogue.json')], work / (final.stem + '.lint.log'), env)
+    for f in [final] + ([companion] if companion else []):
+        if not f.is_file():
+            lines.append('%s FAIL: %s not on disk' % ('FINAL' if f == final else 'COMPANION', f))
+            fails.append('final' if f == final else 'companion')
+            continue
+        code, out = run_logged(['dotnet', str(tool), 'lint', str(f), '--strict', '--catalogue',
+                                str(os.environ.get('N2E_CATALOGUE') or ROOT / 'out/catalogue.json')], work / (f.stem + '.lint.log'), env)
         mm = re.search(r'LINT: (\d+) effects, (\d+) ours / (\d+) pack findings, (\d+) unreadable', out)
         ok = code == 0 and mm and mm.group(2) == '0' and mm.group(4) == '0'
-        lines.append('LINT %s %s: %s' % ('PASS' if ok else 'FAIL', final.name, mm.group(0) if mm else 'no LINT line (exit %d)' % code))
+        lines.append('LINT %s %s: %s' % ('PASS' if ok else 'FAIL', f.name, mm.group(0) if mm else 'no LINT line (exit %d)' % code))
         log('  ' + lines[-1])
         if not ok:
             fails.append('lint')
-        p = subprocess.run(['dotnet', str(tool), 'dump', str(final)], capture_output=True, text=True, encoding='utf-8',
+        p = subprocess.run(['dotnet', str(tool), 'dump', str(f)], capture_output=True, text=True, encoding='utf-8',
                            errors='replace')
         mats = sorted(set(re.findall(r'MaterialFile/Path = (.+\.efkmat)\s*$', p.stdout, re.M)))
-        paths = [str(q) for mp in mats for q in (final.parent / mp, final.parent / 'Materials' / mp) if q.is_file()][:len(mats) * 2]
+        paths = [str(q) for mp in mats for q in (f.parent / mp, f.parent / 'Materials' / mp) if q.is_file()][:len(mats) * 2]
         paths = list(dict.fromkeys(paths))
         if len({Path(x).name for x in paths}) < len(mats):
-            lines.append('HLSL FAIL %s: material(s) named by the effect not on disk' % final.name)
+            lines.append('HLSL FAIL %s: material(s) named by the effect not on disk' % f.name)
             fails.append('hlsl')
         elif paths:
             code, out = run_logged([sys.executable, '-B', str(ROOT / 'tools/hlslcheck/hlslcheck.py')] + paths,
-                                   work / (final.stem + '.hlsl.log'), env)
-            lines.append('HLSL %s %s: %s' % ('PASS' if code == 0 else 'FAIL', final.name,
+                                   work / (f.stem + '.hlsl.log'), env)
+            lines.append('HLSL %s %s: %s' % ('PASS' if code == 0 else 'FAIL', f.name,
                                             (out.strip().splitlines() or ['?'])[-1]))
             if code:
                 fails.append('hlsl')
         else:
-            lines.append('HLSL PASS %s: no file materials' % final.name)
+            lines.append('HLSL PASS %s: no file materials' % f.name)
         log('  ' + lines[-1])
-    else:
-        lines.append('FINAL FAIL: %s not on disk' % final)
-        fails.append('final')
     (work / 'build-results.json').write_text(json.dumps({'lines': lines, 'final': str(final), 'final_mtime':
                                                          final.stat().st_mtime if final.is_file() else None}, indent=1),
                                              encoding='utf-8')
@@ -266,6 +338,8 @@ def _playback(m, task, variant, final, env):
     rel = 'EffectJob%s/' % variant
     effect = rel + final.stem
     prep = "$dataAnimations[%d].effectName = %s;" % (int(pb['anim_id']), json.dumps(effect))
+    if 'display_type' in pb:
+        prep += "$dataAnimations[%d].displayType = %d;" % (int(pb['anim_id']), pb['display_type'])
     cmd = ['node', str(ROOT / 'tools/ingame/run.js'), '--project', str(MF.path(pb['project'])), '--out', str(out),
            '--ids', str(int(pb['anim_id'])), '--map', '%s=%s' % (rel, final.parent), '--prepare', prep,
            '--port', str(int(pb.get('port', 8941)))]
@@ -284,13 +358,17 @@ def _playback(m, task, variant, final, env):
     if cold.get('effectName') != effect or not served:
         return 'FAIL', ('animation %s played %r, served %d file(s) named %s: the --map/--prepare override did not take '
                         'effect' % (pb['anim_id'], cold.get('effectName'), len(served), final.stem))
+    if 'display_type' in pb and any(p.get('displayType') != pb['display_type'] for p in (cold,warm)):
+        return 'FAIL', 'displayType override %s did not take effect (cold %s, warm %s)' % (
+            pb['display_type'],cold.get('displayType'),warm.get('displayType'))
     ok = r.get('status') in ('ok', 'warn') and code == 0 and cold.get('ended') and warm.get('ended')
     return ('PASS' if ok else 'FAIL',
             'status %s; %s served; cold play ended after %s game frames (freeze %s ms, not preloaded), warm after %s; '
             'peak live instances %s%s' % (r.get('status'), effect, cold.get('gameFrames'), cold.get('worstFrameDuringLoadMs'),
                                           warm.get('gameFrames'), cold.get('peakLiveInstances'),
+                                          '; capacity %s; displayType %s%s' % (cold.get('instanceCapacity'), cold.get('displayType'),
                                           '; ' + '; '.join(r.get('failures', []) + r.get('warnings', []))
-                                          if r.get('failures') or r.get('warnings') else ''))
+                                          if r.get('failures') or r.get('warnings') else '')))
 
 
 def write_ledger(m, task, variants, pre, results):
@@ -333,6 +411,9 @@ def result_lines(m, variants, results, per):
         out.append('COVERAGE %s %s: %d rows, %d built, %d saved, %d gap(s), %d without status%s' % (
             sm['coverage'], v, sm['rows'], sm['built'], sm['saved'], sm['gap'], sm['incomplete'],
             '; n/a: ' + ', '.join(sm['na_columns']) if sm['na_columns'] else ''))
+        small = [n[len('RESIZED '):].split(':')[0] for n in per[v][1] if n.startswith('RESIZED ')]
+        if small:       # not a failure, but a size the look depends on: never only in the notes
+            out.append('RESIZED %s: %d layer(s) drawn smaller than the source (--size-cap): %s' % (v, len(small), ', '.join(small)))
     vis = m.get('visual') or {}
     out.append('VISUAL: %s' % ('%s (%s, %s)' % (vis['verdict'], vis.get('by', '?'), vis.get('date', '?')) if vis.get('verdict')
                                else 'not judged; the user judges the look (no tool fills this in)'))

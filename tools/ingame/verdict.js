@@ -34,6 +34,11 @@ function verdict(r) {
     else if (!r.capture.ended) failures.push(`capture: animation did not end within ${r.capture.captureSeconds || 120} s (--capture-seconds; capture is incomplete)`);
   }
   if (r.preload && r.preload.timedOut) warnings.push('preload plugin timed out');
+  for (const k of ['cold', 'warm', 'capture']) {
+    const p = r[k];
+    if (p && p.instanceCapacity > 0 && p.peakLiveInstances >= p.instanceCapacity)
+      warnings.push(`${k}: instance pool capacity reached (${p.peakLiveInstances}/${p.instanceCapacity}); particles may have been refused`);
+  }
   const consoleErrors = Object.keys(r.console || {}).filter((m) => m.startsWith('error:'));
   if (consoleErrors.length) warnings.push(`${consoleErrors.length} distinct console error(s)`);
   return { status: failures.length ? 'fail' : warnings.length ? 'warn' : 'ok', failures, warnings };

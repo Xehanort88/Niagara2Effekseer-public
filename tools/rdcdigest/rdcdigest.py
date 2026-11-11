@@ -13,8 +13,14 @@
                                                                     a kept draw's own change to its targets
   python tools/rdcdigest/rdcdigest.py postvs ID EID [--gs] [--csv OUT] [--attr NAME] [--group N]
                                                                     post-VS output: screen position/size per instance
+  python tools/rdcdigest/rdcdigest.py niagara ID EID [--screen] [--attr KEY] [--csv OUT]
+                                                                    a Niagara sprite/mesh draw's particles: age,
+                                                                    position, velocity, scale, spin, colour, params
   python tools/rdcdigest/rdcdigest.py dynamic ID                    render targets/depth kept draws read, as stored
   python tools/rdcdigest/rdcdigest.py exposure ID                   1x1 targets (UE eye adaptation...) after each write
+  python tools/rdcdigest/rdcdigest.py clock [-c ID] [--offset B] [--cast-gap S] [--find] [--json]
+                                                                    the game clock in each capture's UE View buffer:
+                                                                    time between captures, and which share a cast
   python tools/rdcdigest/rdcdigest.py gpu ID [--top N] [--kept]     per-event GPU time on the replay machine
   python tools/rdcdigest/rdcdigest.py stats                         store size and blobs shared across captures
 
@@ -804,6 +810,130 @@ def postvs(args):
         print('wrote %s' % args.csv)
 
 
+# (key, Niagara VF cbuffer name stem, components). '<stem>DataOffset' locates each in the particle buffers.
+NIAGARA_ATTRS = (('position', 'Position', 3), ('velocity', 'Velocity', 3), ('color', 'Color', 4),
+                 ('scale', 'Scale', 3), ('rotation', 'Rotation', 4), ('age', 'NormalizedAge', 1),
+                 ('random', 'MaterialRandom', 1), ('subimage', 'SubImage', 1),
+                 ('dyn0', 'MaterialParam', 4), ('dyn1', 'MaterialParam1', 4), ('dyn2', 'MaterialParam2', 4),
+                 ('dyn3', 'MaterialParam3', 4), ('prev_position', 'PrevPosition', 3),
+                 ('prev_velocity', 'PrevVelocity', 3), ('prev_scale', 'PrevScale', 3),
+                 ('prev_rotation', 'PrevRotation', 4))
+
+
+def niagara_vars(m, r):
+    """The decoded Niagara*VF constant buffer bound to a draw's vertex shader, or None."""
+    for cb in (((r.get('shaders') or {}).get('vs') or {}).get('cbuffers') or []):
+        if cb.get('name', '').startswith('Niagara') and cb.get('vars'):
+            v = m['tables'].get('cbvars', {}).get(cb['vars'])
+            if v:
+                return next(iter(v.values()))
+    return None
+
+
+def niagara_data(store, m, r):
+    """(cbuffer vars, {key: float32 array (particles, components)}) of a Niagara sprite/mesh draw's particles, read
+    from the particle buffers bound to its vertex shader. The data is SoA: component c of particle i is at
+    buffer[(offset + c) * NiagaraFloatDataStride + i]. An offset of -1 means the attribute is not bound (the
+    cbuffer's Default* value applies); one with the top bit set reads the half buffer at the same stride."""
+    V = niagara_vars(m, r)
+    if V is None:
+        return None, None
+    srvs = ((r.get('shaders') or {}).get('vs') or {}).get('srvs') or []
+
+    def buffer(kind):
+        s = next((x for x in srvs if x['name'].endswith('NiagaraParticleData' + kind) and x.get('hash')), None)
+        p = s and os.path.join(store, 'blobs', 'buffers', s['hash'] + '.bin')
+        if not p or not os.path.exists(p):
+            return None
+        return np.frombuffer(open(p, 'rb').read(), '<f4' if kind == 'Float' else '<f2')
+
+    bufs = {False: buffer('Float'), True: buffer('Half')}
+    stride, n = V.get('NiagaraFloatDataStride') or 0, r.get('instances') or 0
+    out = {}
+    for key, stem, k in NIAGARA_ATTRS:
+        off = V.get(stem + 'DataOffset')
+        if off is None or off == -1:
+            continue
+        half = off < 0
+        src = bufs[half]
+        off &= 0x7fffffff
+        if src is None or stride <= 0 or n <= 0:
+            continue
+        idx = (off + np.arange(k))[:, None] * stride + np.arange(n)[None, :]
+        if idx.max() < src.size:
+            out[key] = src[idx].T.astype(np.float32)
+    return V, out
+
+
+def quat_degrees(a, b):
+    """Angle in degrees between two arrays of unit quaternions (particles, 4)."""
+    return np.degrees(2 * np.arccos(np.clip(np.abs(np.sum(a * b, axis=1)), 0, 1)))
+
+
+def niagara(args):
+    m = load(args.store, args.capture)
+    r = find_row(m, args.eid, args.capture)
+    V, a = niagara_data(args.store, m, r)
+    if V is None:
+        sys.exit('eid %d: no Niagara vertex-factory constant buffer (not a Niagara sprite or mesh draw)' % args.eid)
+    if not a:
+        sys.exit('eid %d: particle data not stored, or no attribute is bound' % args.eid)
+    n = next(iter(a.values())).shape[0]
+    dt = V.get('DeltaSeconds') or 0
+    print('%s eid %d: %d particle(s), stride %s, %s space, DeltaSeconds %.4f, DefaultPosition %s' % (
+        args.capture, args.eid, n, V.get('NiagaraFloatDataStride'), 'local' if V.get('bLocalSpace') else 'world',
+        dt, ' '.join('%.6g' % x for x in V.get('DefaultPosition') or [])))
+    print('bound: ' + ', '.join(a))
+    spin = quat_degrees(a['rotation'], a['prev_rotation']) / dt if dt and 'rotation' in a and 'prev_rotation' in a \
+        else None
+    box = None
+    if args.screen:
+        _, _, f = postvs_data(args.store, m, r)
+        if f is None or f.shape[0] != n:
+            print('--screen: no post-VS data with one entry per particle for this draw')
+        else:
+            px, py, _ = screen_of(f[..., 0:4], r['viewport'])
+            box = []
+            for i in range(n):
+                ok = f[i, :, 3] > 0
+                box.append((float(px[i][ok].max() - px[i][ok].min()), float(py[i][ok].max() - py[i][ok].min()))
+                           if ok.any() else None)
+    extra = None
+    if args.attr:
+        if args.attr not in a:
+            sys.exit('attribute %s not bound (have %s)' % (args.attr, ', '.join(a)))
+        extra = a[args.attr]
+
+    def v3(key, i):
+        return ' '.join('%8.2f' % x for x in a[key][i]) if key in a else ''
+    print('  %3s %5s %-26s %7s %-26s %-17s %8s %-23s%s%s' % (
+        '#', 'age', 'position', 'speed', 'velocity', 'scale', 'spin/s', 'colour',
+        '  screen w x h' if box else '', '  ' + args.attr if extra is not None else ''))
+    for i in range(min(n, args.limit)):
+        print('  %3d %5s %-26s %7s %-26s %-17s %8s %-23s%s%s' % (
+            i, '%.3f' % a['age'][i, 0] if 'age' in a else '', v3('position', i),
+            '%7.2f' % float(np.linalg.norm(a['velocity'][i])) if 'velocity' in a else '', v3('velocity', i),
+            ' '.join('%5.2f' % x for x in a['scale'][i]) if 'scale' in a else '',
+            '%.1f' % spin[i] if spin is not None else '',
+            ' '.join('%5.2f' % x for x in a['color'][i]) if 'color' in a else '',
+            ('  %5.1f x %5.1f' % box[i] if box[i] else '  behind camera') if box else '',
+            '  ' + ' '.join('%.4g' % x for x in extra[i]) if extra is not None else ''))
+    if n > args.limit:
+        print('  ... %d more (--limit, or --csv for all)' % (n - args.limit))
+    if args.csv:
+        with open(args.csv, 'w', newline='') as fh:
+            wr = csv.writer(fh)
+            keys = list(a)
+            wr.writerow(['index'] + ['%s_%d' % (k, c) for k in keys for c in range(a[k].shape[1])] +
+                        (['spin_deg_per_s'] if spin is not None else []) +
+                        (['screen_w_px', 'screen_h_px'] if box else []))
+            for i in range(n):
+                wr.writerow([i] + [float(x) for k in keys for x in a[k][i]] +
+                            ([float(spin[i])] if spin is not None else []) +
+                            ((list(box[i]) if box[i] else ['', '']) if box else []))
+        print('wrote %s' % args.csv)
+
+
 def dynamic(args):
     m = load(args.store, args.capture)
     dyn = m.get('dynamic')
@@ -850,6 +980,66 @@ def exposure(args):
         if d.get('texel'):
             print('  read by kept draws: %s %s %s = %s (first eid %d, written at %s)' % (
                 d['id'], d['name'], d['format'], d['texel'], d['first_eid'], d['written_at']))
+
+
+def view_buffer(m):
+    """(eid, bytes) of the first kept draw's UE View uniform buffer: the constant buffer whose 3x3 at byte 192
+    (ViewToTranslatedWorld) is a rotation. (None, None) when no kept draw binds one."""
+    data = m['tables']['cbdata']
+    for r in m['draws']:
+        if not r.get('keep'):
+            continue
+        for st in ('vs', 'ps'):
+            for cb in (r.get('shaders', {}).get(st) or {}).get('cbuffers') or []:
+                if not cb.get('data'):
+                    continue
+                raw = bytes.fromhex(data[cb['data']])
+                if len(raw) < 256:
+                    continue
+                f = struct.unpack_from('<16f', raw, 192)
+                R = [f[0:3], f[4:7], f[8:11]]
+                dots = [sum(a * b for a, b in zip(R[i], R[j])) for i in range(3) for j in range(3)]
+                if all(abs(d - (1 if k % 4 == 0 else 0)) < 1e-3 for k, d in enumerate(dots)):
+                    return r['eid'], raw
+    return None, None
+
+
+def natural(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
+
+
+def clock(args):
+    """A capture is one frame and its frame number does not convert to time (85, 67 and 115 'fps' within one BD2 cast);
+    View.GameTime does. Differences between captures of one cast match particle-age differences to about 1 ms."""
+    views = []
+    for cid, m in sorted(manifests(args.store, set(args.capture) if args.capture else None), key=lambda kv: natural(kv[0])):
+        eid, raw = view_buffer(m)
+        if raw is None:
+            print('%s: no kept draw binds a View buffer' % cid)
+        else:
+            views.append((cid, eid, raw))
+    if args.find:
+        n = min(len(v[2]) for v in views) // 4 if views else 0
+        print('byte offsets whose float rises through the captures in name order (a clock is one of them):')
+        for i in range(n):
+            vals = [struct.unpack_from('<f', v[2], i * 4)[0] for v in views]
+            if len(vals) > 1 and vals[0] > .01 and all(0 < b - a < 1e6 for a, b in zip(vals, vals[1:])):
+                print('  %5d  %s' % (i * 4, '  '.join('%.4f' % x for x in vals)))
+        return
+    rows = sorted(({'capture': c, 'eid': e, 'clock': struct.unpack_from('<f', raw, args.offset)[0]} for c, e, raw in views
+                   if len(raw) >= args.offset + 4), key=lambda r: r['clock'])
+    cast = 0
+    for i, r in enumerate(rows):
+        r['step'] = None if i == 0 else r['clock'] - rows[i - 1]['clock']
+        cast += i == 0 or r['step'] > args.cast_gap
+        r['cast'] = cast
+    if args.json:
+        print(json.dumps(rows, indent=1))
+        return
+    print('%-36s %6s %12s %10s %5s   (offset %d; a new cast after a step over %g s)' % (
+        'capture', 'eid', 'clock', 'step', 'cast', args.offset, args.cast_gap))
+    for r in rows:
+        print('%-36s %6d %12.4f %10s %5d' % (r['capture'], r['eid'], r['clock'], '' if r['step'] is None else '%+.4f' % r['step'], r['cast']))
 
 
 def gpu(args):
@@ -999,6 +1189,14 @@ def main():
     p.add_argument('--group', type=int, help='vertices per particle when the draw is not instanced (e.g. 4 or 6)')
     p.add_argument('--limit', type=int, default=40)
     p.set_defaults(fn=postvs)
+    p = sub.add_parser('niagara')
+    p.add_argument('capture')
+    p.add_argument('eid', type=int)
+    p.add_argument('--screen', action='store_true', help="join each particle's post-VS screen box")
+    p.add_argument('--attr', help='also print this attribute (e.g. dyn1, random, subimage)')
+    p.add_argument('--csv')
+    p.add_argument('--limit', type=int, default=40)
+    p.set_defaults(fn=niagara)
     p = sub.add_parser('dynamic')
     p.add_argument('capture')
     p.set_defaults(fn=dynamic)
@@ -1006,6 +1204,13 @@ def main():
     p.add_argument('capture')
     p.add_argument('--float-only', action='store_true')
     p.set_defaults(fn=exposure)
+    p = sub.add_parser('clock', help='game clock of each capture, from its UE View buffer')
+    p.add_argument('-c', '--capture', action='append', help='only these capture ids (repeatable; default all)')
+    p.add_argument('--offset', type=int, default=2136, help='byte offset of the clock (default 2136: UE 4.23, BD2; --find for another engine)')
+    p.add_argument('--cast-gap', type=float, default=3.0, help='a step over this many seconds starts a new cast (default 3)')
+    p.add_argument('--find', action='store_true', help='list the offsets that rise through the captures')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(fn=clock)
     p = sub.add_parser('gpu')
     p.add_argument('capture')
     p.add_argument('--top', type=int, default=30)

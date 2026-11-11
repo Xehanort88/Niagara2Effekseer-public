@@ -61,6 +61,7 @@ FLAT = set('EFTILHNMKZXAVWY')
 # Measured from the reference sheets (threshold 128); used if they are absent.
 PACK_CAP_HEIGHT = 131
 PACK_BASELINE = 193
+UI_FONT = 'C:/Windows/Fonts/segoeui.ttf'   # labels of the preview image only, never of the sheets
 CELL = 256
 SCALE = 4
 
@@ -284,8 +285,9 @@ def generate(font_path, output, radius=3.0, overwrite=False, fit='pack'):
     # Preview reads the saved files, rather than rerendering the font.
     preview = Image.new('RGB', (1440, 790), (25, 27, 33))
     d = ImageDraw.Draw(preview)
-    ui = ImageFont.truetype('C:/Windows/Fonts/segoeui.ttf', 22)
-    small = ImageFont.truetype('C:/Windows/Fonts/segoeui.ttf', 15)
+    label = UI_FONT if Path(UI_FONT).is_file() else font_path    # Segoe UI on Windows; elsewhere the sheets' font
+    ui = ImageFont.truetype(str(label), 22)
+    small = ImageFont.truetype(str(label), 15)
     d.text((40, 22), ' / '.join(font.getname())+' — original pack cell layouts', font=ui, fill=(235, 235, 235))
     for row, (name, cells) in enumerate(LAYOUTS.items()):
         y = 87 + row * 165

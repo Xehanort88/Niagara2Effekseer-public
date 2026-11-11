@@ -36,9 +36,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--work', required=True)
     a = ap.parse_args()
-    if sys.platform != 'win32':
-        print('skipped: needs Windows')
-        return 0
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
     fails = 0
@@ -96,10 +93,16 @@ def main():
         # own result through the ending's background fetch with a preprocessor redirect
         'refraction: redirected background fetch': (efkmat(redirect, refraction=1), 'ok', ''),
     }
-    for name, (data, want, word) in cases.items():
+    for k, (name, (data, want, word)) in enumerate(cases.items()):
         p = work / (re.sub(r'[^A-Za-z0-9.()-]+', '_', name) + '.efkmat')
         p.write_bytes(data)
-        got, msg = H.check(p)
+        try:
+            got, msg = H.check(p)
+        except H.wincache.Unavailable as e:          # off Windows: d3dcompiler results come from a Windows run
+            if k == 0:
+                print('skipped: needs Windows (no stored d3dcompiler results; run this suite once on Windows)')
+                return 0
+            got, msg = 'N/A', str(e)
         check(name + ' -> ' + want, got == want and word in msg, (got, msg))
     info = H.parse_efkmat(cases['portable'][0])
     check('parse: textures, uniforms, custom data', info['textures'][0]['name'] == 'tex0'

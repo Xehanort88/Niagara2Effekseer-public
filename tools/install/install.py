@@ -83,7 +83,7 @@ def build(tool, spec, out):
     return verify[-1]
 
 
-def add_animation(anim_path, effect_name, name, replace, display_type=None):
+def add_animation(anim_path, effect_name, name, replace, display_type=None, offsets=None):
     raw_bytes = anim_path.read_bytes()
     raw = raw_bytes.decode('utf-8')
     data = json.loads(raw)
@@ -91,8 +91,8 @@ def add_animation(anim_path, effect_name, name, replace, display_type=None):
     if existing:
         if not replace:
             fail('animation %d already plays %s; pass --replace to reinstall over it' % (existing[0]['id'], effect_name))
-        if display_type is not None:
-            return repoint_animation(anim_path, existing[0]['id'], effect_name, display_type)
+        if display_type is not None or offsets is not None:
+            return repoint_animation(anim_path, existing[0]['id'], effect_name, display_type, offsets)
         print('  animation %d already plays %s: kept' % (existing[0]['id'], effect_name))
         return existing[0]['id']
     nl = '\r\n' if '\r\n' in raw else '\n'
@@ -103,6 +103,7 @@ def add_animation(anim_path, effect_name, name, replace, display_type=None):
     entry = {'id': new_id, 'displayType': 0 if display_type is None else display_type, 'effectName': effect_name, 'flashTimings': [], 'name': name,
              'offsetX': 0, 'offsetY': 0, 'rotation': {'x': 0, 'y': 0, 'z': 0}, 'scale': 100, 'soundTimings': [],
              'speed': 100, 'timings': []}
+    entry.update(offsets or {})
     out = body[:-len(nl + ']')] + ',' + nl + json.dumps(entry, ensure_ascii=False, separators=(',', ':')) + nl + ']' + raw[len(body):]
     check = json.loads(out)
     if check[:len(data)] != data or check[new_id]['id'] != new_id:
@@ -114,7 +115,7 @@ def add_animation(anim_path, effect_name, name, replace, display_type=None):
     return new_id
 
 
-def repoint_animation(anim_path, anim_id, effect_name, display_type=None):
+def repoint_animation(anim_path, anim_id, effect_name, display_type=None, offsets=None):
     raw_bytes = anim_path.read_bytes()
     raw = raw_bytes.decode('utf-8')
     data = json.loads(raw)
@@ -124,7 +125,8 @@ def repoint_animation(anim_path, anim_id, effect_name, display_type=None):
     if other:
         fail('animation %d already plays %s' % (other[0], effect_name))
     old = data[anim_id].get('effectName')
-    if old == effect_name and (display_type is None or data[anim_id].get('displayType') == display_type):
+    if old == effect_name and (display_type is None or data[anim_id].get('displayType') == display_type) and \
+            all(data[anim_id].get(k) == v for k, v in (offsets or {}).items()):
         print('  animation %d already plays %s: kept' % (anim_id, effect_name))
         return anim_id
     nl = '\r\n' if '\r\n' in raw else '\n'
@@ -132,6 +134,7 @@ def repoint_animation(anim_path, anim_id, effect_name, display_type=None):
     new = dict(data[anim_id], effectName=effect_name)
     if display_type is not None:
         new['displayType'] = display_type
+    new.update(offsets or {})
     hits = [k for k, line in enumerate(lines) if re.match(r'\{"id":%d,' % anim_id, line)]
     if len(hits) != 1:
         fail('%s does not hold animation %d on one line; not touching it' % (anim_path, anim_id))
@@ -174,10 +177,22 @@ def hdr_sidecar(path, fallback):
             bad.append('bloom.radiusScale must be a number > 0')
         if 'threshold' in b and not num(b['threshold']):
             bad.append('bloom.threshold must be a finite number')
+        if 'intensityKeys' in b:
+            k = b['intensityKeys']
+            if not (isinstance(k, list) and k and all(isinstance(x, list) and len(x) == 2 and num(x[0]) and num(x[1]) and x[1] >= 0
+                                                       and (i == 0 or x[0] > k[i - 1][0]) for i, x in enumerate(k))):
+                bad.append('bloom.intensityKeys must be [[frame, intensity >= 0], ...], at least one, frames increasing')
         for k, ok in (('sizes', lambda v: v > 0), ('tints', lambda v: v >= 0)):
             v = b.get(k)
             if v is not None and not (isinstance(v, list) and len(v) == 6 and all(num(x) and ok(x) for x in v)):
                 bad.append('bloom.%s must be six %s numbers' % (k, 'positive' if k == 'sizes' else 'nonnegative'))
+    if 'gradeB' in side or 'gradeKeys' in side:
+        k = side.get('gradeKeys')
+        if not isinstance(side.get('gradeB'), str) or 'tmOut' not in side['gradeB']:
+            bad.append('gradeB must be GLSL that declares vec3 tmOut, with gradeKeys')
+        if not (isinstance(k, list) and k and all(isinstance(x, list) and len(x) == 2 and num(x[0]) and num(x[1]) and 0 <= x[1] <= 1
+                                                   and (i == 0 or x[0] > k[i - 1][0]) for i, x in enumerate(k))):
+            bad.append('gradeKeys must be [[frame, weight 0..1], ...], at least one, frames increasing, with gradeB')
     if 'companion' in side:
         cp = side['companion']
         if not isinstance(cp, str) or not cp.strip() or cp.lower().endswith('.efkefc') or cp == side.get('fallback'):
@@ -202,6 +217,9 @@ def main():
     p.add_argument('--replace', action='store_true', help='reinstall over an existing effect (keeps its animation)')
     p.add_argument('--display-type', type=int, choices=(0, 1, 2),
                    help='0: each target (default for new animations); 1: target group; 2: screen. Existing entries are kept when omitted.')
+    p.add_argument('--offset-x', type=int, help="the animation's offsetX (screen px); kept when omitted (0 for new animations)")
+    p.add_argument('--offset-y', type=int, help="the animation's offsetY (screen px, + is down); kept when omitted (0 for new "
+                   'animations). a UE 4.23 study effect: displayType 2, offsetY 130 puts its dome on the ground mid-frame')
     p.add_argument('--tool', type=Path, default=ROOT / 'src/Niagara2Efk/bin/x64/Release/net9.0/Niagara2Efk.dll')
     p.add_argument('--catalogue', type=Path, default=ROOT / 'out/catalogue.json')
     p.add_argument('--work', type=Path, help='staging folder (default out/install/<effect name>)')
@@ -252,6 +270,20 @@ def main():
             companion = project / 'effects' / (cp + '.efkefc') if '/' in cp else target.with_name(cp + '.efkefc')
             if companion.resolve() in (target.resolve(), twin.resolve()) or not companion.is_file() or companion.with_suffix('.hdr.json').exists():
                 fail('HDR companion %s must be a separate installed ordinary effect without a sidecar; install order: twin, companion, then the HDR effect' % companion, 2)
+        if 'intensityKeys' in side.get('bloom', {}):
+            # runtimes before 20261031.2 accept the sidecar and play bloom.intensity, the keys silently ignored
+            m = re.search(r'RPG_REACTOR_RUNTIME_REVISION = "([0-9.]+)"', (project / 'js/reactor_main.js').read_text(encoding='utf-8'))                 if (project / 'js/reactor_main.js').is_file() else None
+            if not m:
+                print('  WARNING: runtime revision of %s unknown; bloom.intensityKeys need 20261031.2 or later' % project)
+            elif tuple(int(x) for x in m.group(1).split('.')) < (20261031, 2):
+                fail('HDR sidecar keys its bloom intensity (bloom.intensityKeys), which runtime %s ignores (it plays bloom.intensity); '
+                     'update the project runtime to 20261031.2 or later first' % m.group(1), 2)
+        if 'gradeB' in side:
+            # runtimes before 20261108.1 accept the sidecar and play `grade`: a look difference, not a failure
+            m = re.search(r'RPG_REACTOR_RUNTIME_REVISION = "([0-9.]+)"', (project / 'js/reactor_main.js').read_text(encoding='utf-8')) if (project / 'js/reactor_main.js').is_file() else None
+            if not m or tuple(int(x) for x in m.group(1).split('.')) < (20261108, 1):
+                print('  WARNING: runtime %s of %s plays only the sidecar\'s first grade; gradeB + gradeKeys need 20261108.1 or later'
+                      % (m.group(1) if m else 'unknown', project))
         print('0. HDR sidecar %s (fallback %s)' % (side_src.name, fb))
     elif Path(dest).name.lower().endswith('-hdr'):
         fail('%s is an -hdr effect but %s is missing: the engine fails it closed without its sidecar (pass --hdr FILE)'
@@ -293,7 +325,9 @@ def main():
         print('INSTALL OK: %s (no animation; Animations.json unchanged)' % dest)
         return
     print('4. animation')
-    anim_id = repoint_animation(anim_path, a.id, dest, a.display_type) if a.id is not None else add_animation(anim_path, dest, a.name, a.replace, a.display_type)
+    offsets = {k: v for k, v in (('offsetX', a.offset_x), ('offsetY', a.offset_y)) if v is not None} or None
+    anim_id = (repoint_animation(anim_path, a.id, dest, a.display_type, offsets) if a.id is not None
+               else add_animation(anim_path, dest, a.name, a.replace, a.display_type, offsets))
 
     if a.ingame:
         print('5. in-game run')

@@ -38,9 +38,44 @@ const node = (script, args) => spawnSync(process.execPath, [path.join(__dirname,
 // ---- verdict -------------------------------------------------------------
 const okTime = () => ({ tag: 't', cold: { requestToStartMs: 40, ended: true, loadErr: false }, warm: { requestToStartMs: 1, ended: true, loadErr: false }, errors: [], engineErrors: [], console: {} });
 const okCap = (frames = 2, step = 1) => ({ tag: 'c', capture: { frames, ended: true, size: [2, 1], step }, errors: [], engineErrors: [], console: {}, sceneMean: [10, 10, 10] });
+
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
 
+test('verdict_pool_capacity', () => {
+  for (const capacity of [4000, 32000]) {
+    const r = okTime();
+    Object.assign(r.cold, { instanceCapacity: capacity, peakLiveInstances: capacity - 1 });
+    assert.strictEqual(verdict(r).status, 'ok');
+    r.cold.peakLiveInstances++;
+    assert.strictEqual(verdict(r).status, 'warn');
+    assert.match(verdict(r).warnings.join(), /instance pool capacity reached/);
+  }
+  const r = okCap(); Object.assign(r.capture, { instanceCapacity: 4000, peakLiveInstances: 4000 });
+  assert.strictEqual(verdict(r).status, 'warn');
+});
+test('page_reads_actual_idle_pool', () => {
+  // The pool's capacity is its free count when idle (the most seen per context), so a custom
+  // init(instanceMaxCount) is read as it is; peak live = that capacity minus the fewest free.
+  const src = fs.readFileSync(path.join(__dirname, 'page.js'), 'utf8');
+  const hook = src.slice(src.indexOf('  function hookEngine()'), src.indexOf('  // Mean colour'));
+  for (const capacity of [4000, 12000]) {
+    let rest = capacity;
+    const P = { peakLive: 0, instanceCapacity: null, loads: {}, engineErrors: [], updMs: 0, renderMs: 0 };
+    const ctx = { getRestInstancesCount: () => rest, drawHandle() {}, update() {} };
+    const context = { P, window: {}, performance: { now: () => 0 }, SceneManager: { updateEffekseer() {} },
+      EffectManager: {}, Graphics: { effekseer: ctx, _effekseerGL: {} } };
+    require('vm').runInNewContext(hook + '; hookEngine();', context);
+    ctx.update(1);                                  // idle: nothing alive yet
+    assert.strictEqual(P.instanceCapacity, capacity);
+    assert.strictEqual(P.peakLive, 0);
+    rest -= 123; ctx.update(1);
+    assert.strictEqual(P.peakLive, 123);
+    rest = 0; ctx.update(1);
+    assert.strictEqual(P.peakLive, capacity);
+    assert.strictEqual(P.instanceCapacity, capacity);
+  }
+});
 test('verdict_ok_time', () => assert.deepStrictEqual(verdict(okTime()), { status: 'ok', failures: [], warnings: [] }));
 test('verdict_ok_capture', () => assert.strictEqual(verdict(okCap()).status, 'ok'));
 test('verdict_timeout_fails', () => assert.strictEqual(verdict({ timeout: true }).status, 'fail'));

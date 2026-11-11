@@ -40,7 +40,8 @@
 //                          played on (effekseerPath: scene | overlay).
 //   --headed               show Chrome for real GPU performance measurements
 //   --port N               default 8901; pick one nobody else is using
-//   --chrome <path>        default C:/Program Files/Google/Chrome/Application/chrome.exe
+//   --chrome <path>        default N2E_CHROME, else C:/Program Files/Google/Chrome/Application/chrome.exe, else
+//                          Playwright's Chromium (Linux: SwiftShader WebGL, --no-sandbox)
 //   --max-frames N         time mode: game frames (Graphics.frameCount, 60 per
 //                          second) an animation may play before it counts as
 //                          not ending, default 3000. Not browser frames: on a
@@ -80,7 +81,16 @@ const need = (k) => { if (!opts[k]) { console.error('missing --' + k); process.e
 const ROOT = path.resolve(need('project'));
 const OUT = path.resolve(need('out'));
 const port = +(opts.port || 8901);
-const chromePath = opts.chrome || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
+// --chrome, else N2E_CHROME, else the Windows install, else Playwright's Chromium (a Linux cloud container has one).
+function findChrome() {
+  const found = ['C:/Program Files/Google/Chrome/Application/chrome.exe'];
+  try { found.push(require('playwright').chromium.executablePath()); } catch (e) { /* no Playwright here */ }
+  return found.find(p => fs.existsSync(p)) || found[0];
+}
+const chromePath = opts.chrome || process.env.N2E_CHROME || findChrome();
+// Off Windows there is no D3D11 ANGLE: WebGL on SwiftShader, and no sandbox (containers run as root).
+const gpuFlags = process.platform === 'win32' ? ['--use-angle=d3d11']
+  : ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'];
 if (!fs.existsSync(path.join(ROOT, 'index.html'))) { console.error('no index.html in ' + ROOT); process.exit(2); }
 if (!fs.existsSync(chromePath)) { console.error('Chrome not found: ' + chromePath); process.exit(2); }
 
@@ -165,7 +175,7 @@ async function runOne(j) {
     for (const f of fs.readdirSync(capDir)) if (FRAME_FILE.test(f)) { fs.unlinkSync(path.join(capDir, f)); cleared++; }
   }
   const profile = fs.mkdtempSync(path.join(OUT, '.chrome-'));
-  const chrome = spawn(chromePath, [...(opts.headed ? [] : ['--headless=new']), '--use-angle=d3d11', '--ignore-gpu-blocklist', '--enable-gpu', '--no-first-run',
+  const chrome = spawn(chromePath, [...(opts.headed ? [] : ['--headless=new']), ...gpuFlags, '--ignore-gpu-blocklist', '--enable-gpu', '--no-first-run',
     '--no-default-browser-check', '--window-size=1280,720', '--user-data-dir=' + profile, ...(opts.headed ? ['--app=' + `http://127.0.0.1:${port}/`] : [`http://127.0.0.1:${port}/`])], { stdio: 'ignore' });
   chrome.once('error', (e) => { if (pending) pending({ runnerError: 'Chrome failed: ' + e.message }); });
   let timer;

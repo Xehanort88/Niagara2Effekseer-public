@@ -25,7 +25,7 @@
   // play also ends when the game frame stands still for STALL_FRAMES browser
   // frames (10 s at 60 Hz, 3.6 s at 165 Hz; a load freeze is one long frame).
   const MAX_FRAMES = job.maxFrames || 3000, CAPTURE_S = job.captureSeconds || 120, LOAD_FRAMES = 3000, STALL_FRAMES = 600;
-  const P = { loads: {}, renderMs: 0, updMs: 0, finish: false, peakLive: 0, longTasks: [], engineErrors: [] };
+  const P = { loads: {}, renderMs: 0, updMs: 0, finish: false, peakLive: 0, instanceCapacity: null, longTasks: [], engineErrors: [] };
   // Console warnings and errors (first 40 distinct, with repeat counts).
   const consoleLog = {};
   for (const level of ['warn', 'error']) {
@@ -73,7 +73,9 @@
       let st = pools.get(this);
       if (!st) { st = { most: rest }; pools.set(this, st); }
       st.most = Math.max(st.most, rest);
-      P.peakLive = Math.max(P.peakLive, st.most - rest);
+      // The pool's size is its free count when idle (the most seen), which includes a custom init(instanceMaxCount);
+      // the capacity reported is that of the pool where the peak was reached.
+      if (st.most - rest >= P.peakLive) { P.peakLive = st.most - rest; P.instanceCapacity = st.most; }
     };
     hookSceneLayer();
   }
@@ -200,10 +202,13 @@
       drawMs: { median: q(rs, 0.5, 2), p95: q(rs, 0.95, 2), max: q(rs, 1, 2), gpuSynced: finish },
       updateMsMax: play.length ? +Math.max(...play.map((f) => f.upd)).toFixed(2) : null,
       peakLiveInstances: P.peakLive,
+      instanceCapacity: P.instanceCapacity,
+      displayType: anim.displayType,
     };
   }
 
   async function capture(id, step, shots) {
+    P.peakLive = 0;
     SceneManager.determineRepeatNumber = function () { return 1; };
     const anim = $dataAnimations[id];
     const ss = SceneManager._scene._spriteset;
@@ -257,7 +262,8 @@
     $gameTemp.requestAnimation($gameTroop.aliveMembers(), id);
     for (let i = 0; i < CAPTURE_S * 20 && !done; i++) await sleep(50);
     await Promise.all(sends);
-    return { frames: lastF, ended: done, size: [W >> 1, H >> 1], step, captureSeconds: CAPTURE_S };
+    return { frames: lastF, ended: done, size: [W >> 1, H >> 1], step, captureSeconds: CAPTURE_S,
+      peakLiveInstances: P.peakLive, instanceCapacity: P.instanceCapacity, displayType: anim.displayType };
   }
 
   try {

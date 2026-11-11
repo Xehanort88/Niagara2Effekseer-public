@@ -1,4 +1,6 @@
 * text=auto
+# Shell scripts run under bash (Git Bash on Windows too), which fails on CRLF: keep LF in every checkout.
+*.sh       text eol=lf
 *.efkefc   binary
 *.efkmodel binary
 *.efkmat   binary

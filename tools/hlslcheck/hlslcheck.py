@@ -20,11 +20,14 @@ Exit code 1 if any material fails. A material that uses Effekseer's built-in gra
 reported as SKIP (those function bodies are not reproduced here).
 """
 import argparse
-import ctypes
 import re
 import struct
 import sys
 from pathlib import Path
+
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))   # tools/: wincache
+import wincache  # noqa: E402
 
 TYPES = {1: 'float', 2: 'float2', 3: 'float3', 4: 'float4'}
 
@@ -241,26 +244,11 @@ def to_hlsl_vs(info, model=False):
         '  return Output;', '}'])
 
 
-def _blob_text(ptr):
-    if not ptr:
-        return ''
-    vt = ctypes.cast(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
-    get_ptr = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p)(vt[3])
-    get_size = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_void_p)(vt[4])
-    return ctypes.string_at(get_ptr(ptr), get_size(ptr)).decode('latin1')
-
-
 def compile_hlsl(src, name='material', profile='ps_4_0'):
-    """(ok, messages) from d3dcompiler_47 for a 'main' (ps_4_0, or vs_4_0 for the vertex shaders)."""
-    d3d = ctypes.WinDLL('d3dcompiler_47.dll')
-    fn = d3d.D3DCompile
-    fn.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p,
-                   ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint,
-                   ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
-    b = src.encode('utf-8')
-    out, err = ctypes.c_void_p(), ctypes.c_void_p()
-    hr = fn(b, len(b), name.encode(), None, None, b'main', profile.encode(), 0, 0, ctypes.byref(out), ctypes.byref(err))
-    return hr == 0, _blob_text(err.value)
+    """(ok, messages) from d3dcompiler_47 for a 'main' (ps_4_0, or vs_4_0 for the vertex shaders). Off Windows the
+    result stored by an earlier Windows run is used (tools/wincache.py); without one, wincache.Unavailable."""
+    ok, _code, messages = wincache.compile_hlsl(src.encode('utf-8'), profile, 'main', 0, name)
+    return ok, messages
 
 
 def check(path):
@@ -285,19 +273,21 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('paths', nargs='+')
     a = ap.parse_args(argv)
-    if sys.platform != 'win32':
-        print('hlslcheck needs Windows (d3dcompiler_47.dll)')
-        return 2
     files = []
     for p in map(Path, a.paths):
         files += sorted(p.rglob('*.efkmat')) if p.is_dir() else [p]
-    failed = 0
+    failed = unchecked = 0
     for f in files:
-        status, msg = check(f)
+        try:
+            status, msg = check(f)
+        except wincache.Unavailable:                     # off Windows, and no stored d3dcompiler result for it
+            status, msg = 'N/A', 'needs Windows (d3dcompiler_47.dll): no stored result for this material'
+            unchecked += 1
         failed += status == 'FAIL'
         print('%-4s %s%s' % (status, f, ('  ' + msg[:200]) if msg else ''))
-    print('HLSLCHECK: %d material(s), %d failed' % (len(files), failed))
-    return 1 if failed else 0
+    print('HLSLCHECK: %d material(s), %d failed' % (len(files), failed)
+          + (', %d not checked (needs Windows)' % unchecked if unchecked else ''))
+    return 1 if failed else 2 if unchecked else 0
 
 
 if __name__ == '__main__':

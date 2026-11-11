@@ -97,6 +97,20 @@ def main():
     changed = json.loads((project / 'data/Animations.json').read_text())
     require(r.returncode == 0 and changed[:-1] == group[:-1] and changed[-1] == dict(group[-1], displayType=2), r.stdout + r.stderr)
     passed += 1; print('PASS explicit --display-type on --replace --id changes only the selected animation')
+    r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(spec),
+                        '--dest', 'Edited/Group/T', '--id', str(group[-1]['id']), '--replace', '--offset-y', '130',
+                        '--tool', str(a.tool), '--work', str(work / 'stage-group')], capture_output=True, text=True)
+    shifted = json.loads((project / 'data/Animations.json').read_text())
+    require(r.returncode == 0 and shifted[:-1] == changed[:-1] and shifted[-1] == dict(changed[-1], offsetY=130), r.stdout + r.stderr)
+    passed += 1; print('PASS --offset-y on --replace --id sets offsetY on that animation only, displayType kept')
+    r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(spec),
+                        '--dest', 'Edited/Screen/T', '--name', 'Screen T', '--display-type', '2', '--offset-x', '-8',
+                        '--offset-y', '130', '--tool', str(a.tool), '--work', str(work / 'stage-screen')],
+                       capture_output=True, text=True)
+    added = json.loads((project / 'data/Animations.json').read_text())
+    require(r.returncode == 0 and added[:-1] == shifted and added[-1]['displayType'] == 2 and added[-1]['offsetX'] == -8
+            and added[-1]['offsetY'] == 130, r.stdout + r.stderr)
+    passed += 1; print('PASS --offset-x / --offset-y on a new animation; other entries unchanged')
 
     png(src / 'tex/Glow.png', 64)          # regenerated under the same name: the project's copy is now stale
     out = install('--replace', code=1)
@@ -155,6 +169,23 @@ def main():
     require('HDR sidecar written' in out and written == good and (hdr_dir / 'T-hdr.efkefc').exists()
             and not (hdr_dir / 'T-ldr.hdr.json').exists(), out)
     passed += 1; print('PASS an HDR install writes the checked sidecar beside it; --hdr-fallback names the twin')
+
+    keyed = dict(good, bloom=dict(good['bloom'], intensityKeys=[[0, 1.374], [66.36, 2.0], [147.28, 0.122]]))
+    side.write_text(json.dumps(dict(keyed, bloom=dict(keyed['bloom'], intensityKeys=[[5, 1], [2, 2]]))))
+    out = put('Edited/HDR/T-hdr', hspec, '--replace', code=2)
+    require('bloom.intensityKeys must be' in out, out)
+    side.write_text(json.dumps(keyed))
+    (project / 'js').mkdir(exist_ok=True)
+    (project / 'js/reactor_main.js').write_text('globalThis.RPG_REACTOR_RUNTIME_REVISION = "20261031.1";\n')
+    out = put('Edited/HDR/T-hdr', hspec, '--replace', code=2)
+    require('runtime 20261031.1 ignores' in out, out)
+    (project / 'js/reactor_main.js').write_text('globalThis.RPG_REACTOR_RUNTIME_REVISION = "20261031.2";\n')
+    put('Edited/HDR/T-hdr', hspec, '--replace')
+    require(json.loads((hdr_dir / 'T-hdr.hdr.json').read_text(encoding='utf-8')) == keyed, 'keyed sidecar not written as given')
+    (project / 'js/reactor_main.js').unlink()
+    side.write_text(json.dumps(good))
+    put('Edited/HDR/T-hdr', hspec, '--replace')
+    passed += 1; print('PASS bloom.intensityKeys are checked, and refused on a runtime older than 20261031.2')
 
     out = put('Edited/HDR/T-hdr', hspec, '--replace', '--hdr-fallback', 'T-hdr', code=2)
     require('names this effect itself' in out, out)

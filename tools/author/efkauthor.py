@@ -18,7 +18,15 @@ parts; `Spec.copy` copies an existing node of this effect (and everything set on
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
+
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))   # tools/: portpath
+try:
+    import portpath  # noqa: E402  (Linux: drive paths in specs; tools/portpath.py)
+except ImportError:      # a copy of this file without tools/portpath.py: specs are written as they are
+    portpath = None
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TOOL = ROOT / 'src/Niagara2Efk/bin/x64/Release/net9.0/Niagara2Efk.dll'
@@ -413,7 +421,9 @@ class Spec:
         return self
 
     def write(self, path):
-        Path(path).write_text(json.dumps(self.data, indent=2) + '\n', encoding='utf-8')
+        # off Windows a drive path ('E:/...') is relative, and edit resolves it against the spec's folder
+        data = portpath.for_subprocess(self.data) if portpath else self.data
+        Path(path).write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
         return Path(path)
 
     def build(self, out, spec_path=None, tool=DEFAULT_TOOL):

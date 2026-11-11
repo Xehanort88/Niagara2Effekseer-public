@@ -2,7 +2,11 @@
 changed box and crop, RenderDoc format names, contribution and dynamic-snapshot conversion, post-VS screen maths.
 usage: python tools/rdcdigest/test_rdcdigest.py --work <folder>"""
 import argparse
+import contextlib
+import io
+import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -203,6 +207,32 @@ def main():
     _, lay, f = rdcdigest.postvs_data(store, m, r)
     check('postvs grouping', f.shape == (3, 4, 6) and f[2, 3, 5] == 71 and lay[1]['offset'] == 16)
 
+    # Niagara particle data: SoA at a stride wider than the particle count, an unbound attribute (-1), one in
+    # the half buffer (top bit set), and the spin between Rotation and PrevRotation.
+    os.makedirs(os.path.join(store, 'blobs', 'buffers'), exist_ok=True)
+    stride, comps = 3, 11                                  # 2 particles live in 3-wide columns
+    fl = np.full((comps, stride), -9, np.float32)
+    fl[0:3, 0], fl[0:3, 1] = [1, 2, 3], [4, 5, 6]          # Position (offset 0)
+    fl[3:7, 0] = fl[3:7, 1] = [0, 0, 0, 1]                 # Rotation (offset 3): identity
+    fl[7:11, 0] = [0, 0, 0, 1]                             # PrevRotation (offset 7): identity, then
+    fl[7:11, 1] = [0, 0, np.sin(np.pi / 4), np.cos(np.pi / 4)]  # 90 degrees about z
+    open(os.path.join(store, 'blobs', 'buffers', 'nf.bin'), 'wb').write(fl.tobytes())
+    hl = np.zeros((3, stride), np.float16)
+    hl[0:3, 1] = [0.5, 0.25, 2]                            # Scale (half, offset 0) of particle 1
+    open(os.path.join(store, 'blobs', 'buffers', 'nh.bin'), 'wb').write(hl.tobytes())
+    m = {'tables': {'cbvars': {'V': {'NiagaraMeshVF': {
+        'NiagaraFloatDataStride': stride, 'PositionDataOffset': 0, 'RotationDataOffset': 3,
+        'PrevRotationDataOffset': 7, 'ScaleDataOffset': -2147483648, 'ColorDataOffset': -1}}}}}
+    r = {'instances': 2, 'shaders': {'vs': {
+        'cbuffers': [{'name': 'NiagaraMeshVF', 'vars': 'V'}],
+        'srvs': [{'name': 'NiagaraMeshVF_NiagaraParticleDataFloat', 'hash': 'nf'},
+                 {'name': 'NiagaraMeshVF_NiagaraParticleDataHalf', 'hash': 'nh'}]}}}
+    V, a = rdcdigest.niagara_data(store, m, r)
+    spin = rdcdigest.quat_degrees(a['rotation'], a['prev_rotation'])
+    check('niagara SoA decode', a['position'].tolist() == [[1, 2, 3], [4, 5, 6]] and 'color' not in a and
+          a['scale'][1].tolist() == [0.5, 0.25, 2] and np.allclose(spin, [0, 90], atol=1e-3),
+          '%s %s %s' % (a.get('position'), a.get('scale'), spin))
+    check('niagara non-Niagara draw', rdcdigest.niagara_data(store, m, {'shaders': {'vs': {}}}) == (None, None))
     # --dedup: a capture file equal to a blob becomes a hard link; rewriting it later (write_exr) never touches the blob
     ds = os.path.join(work, 'dedup')
     if os.path.exists(ds):
@@ -221,6 +251,36 @@ def main():
     ddsio.write_exr(rt, {'R': big['R'] * 2})
     check('rewrite breaks the link, blob unchanged', not os.path.samefile(blob, rt) and
           np.array_equal(ddsio.read_exr(blob)['R'], big['R']) and np.array_equal(ddsio.read_exr(rt)['R'], big['R'] * 2))
+
+    # clock: the View buffer is found by its rotation, steps and casts follow the clock, not the capture names
+    cs = os.path.join(work, 'clockstore')
+
+    def view_manifest(t, rotation=True):
+        raw = bytearray(4096)
+        if rotation:
+            struct.pack_into('<16f', raw, 192, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1)
+        struct.pack_into('<f', raw, 2136, t)
+        return {'tables': {'cbdata': {'k': raw.hex()}}, 'draws': [
+            {'eid': 5, 'keep': False, 'shaders': {'vs': {'cbuffers': [{'data': 'k'}]}}},
+            {'eid': 9, 'keep': True, 'shaders': {'ps': {'cbuffers': [{'data': None}]}, 'vs': {'cbuffers': [{'data': 'k'}]}}}]}
+
+    for cid, t, rot in (('c10', 419.25, True), ('c2', 419.0, True), ('c30', 430.0, True), ('c4', 1.0, False)):
+        os.makedirs(os.path.join(cs, 'captures', cid))
+        json.dump(view_manifest(t, rot), open(os.path.join(cs, 'captures', cid, 'manifest.json'), 'w'))
+    check('view buffer: kept draw, by rotation', rdcdigest.view_buffer(view_manifest(1.0))[0] == 9)
+    check('view buffer: none without a rotation', rdcdigest.view_buffer(view_manifest(1.0, False)) == (None, None))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rdcdigest.clock(argparse.Namespace(store=cs, capture=None, offset=2136, cast_gap=3.0, find=False, json=True))
+    text = out.getvalue()
+    rows = json.loads(text[text.index('['):])
+    check('clock: order, step and casts', [(r['capture'], r['cast']) for r in rows] == [('c2', 1), ('c10', 1), ('c30', 2)] and
+          abs(rows[1]['step'] - .25) < 1e-6 and rows[0]['step'] is None, rows)
+    check('clock: a capture without a View buffer is reported', 'c4: no kept draw' in text, text)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rdcdigest.clock(argparse.Namespace(store=cs, capture=['c2', 'c10', 'c30'], offset=2136, cast_gap=3.0, find=True, json=False))
+    check('clock --find lists the rising float', re.search(r'^\s+2136\s', out.getvalue(), re.M) is not None, out.getvalue())
 
     import index_tests
     index_tests.run(work, check, dds_dx10)

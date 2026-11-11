@@ -14,6 +14,9 @@ out/
 tools/render-harness/assembled/
 tools/render-harness/columnexplode/
 
+# Packed test data (tools/testdata/pack.py): committed only with `git add -f` on a temporary data branch.
+/testdata/
+
 # Local Claude Code permissions
 .claude/settings.local.json
 
