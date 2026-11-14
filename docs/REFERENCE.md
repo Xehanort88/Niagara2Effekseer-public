@@ -2153,8 +2153,16 @@ scale 8), `holy-light` (-0.8, scale 5) and `high-threshold` (20, scale 10:
 only exposed light above 20 blooms) are read from the display capture's bloom setup
 and tonemap cbuffers. `--ot2port-bloom-setting standard|holy-light|high-threshold` overrides that. A capture matching none
 of them stops the build before it starts. `--ot2port-hdr-radius R` sets
-`bloom.radiusScale` (default 2.4): the effect's size on RPG Reactor's view over its size on the game's. The build
-prints an `HDR SIDECAR:` line with the setting used. On identical light the overlay gives 1.04-1.17x the game's bloom
+`bloom.radiusScale` (default 2.4): the effect's size on RPG Reactor's view over its size on the game's.
+`--ot2port-hdr-bloom I` sets `bloom.intensity` (default 1, the game's; one beam skill needed 0.5 against eight
+captures and the footage, so measure it per effect). **The grade ends in the display the user sees** (since
+2026-11-12): a capture's stored final image is not what the game shows on screen or in recorded footage, which is
+that image ^2.2 (identical HUD pixels 118 stored, 56 in the footage, day and night; `final.png` ^2.2 equalled the
+footage at every moment of that skill tested, `out/edits/otm-helix-width-20261112/NOTES.md`). The sidecar's grade is
+therefore followed by `pow(tmOut, 2.2)` before the backdrop is solved (`--ot2port-hdr-display-gamma G`, default
+`ot2_display.DISPLAY_GAMMA` 2.2; `1` gives the stored image, as every sidecar written before that date: they play
+brighter and hazier than the game). The graded twins and the ordinary OT2 builds still compute the stored image in
+their materials. The build prints an `HDR SIDECAR:` line with the setting used. On identical light the overlay gives 1.04-1.17x the game's bloom
 energy (`out/edits/ot2-game-bloom-20261025/NOTES.md`).
 The default fallback is the build name without `-hdr`, or `<name>-ldr` when no suffix was present; edit the sidecar
 when naming the installed pair differently. `effectjob` accepts `"hdr": true` at manifest, system, or build level for
@@ -2269,6 +2277,20 @@ the plugin still covers what that list leaves out (battle items, the troop's bat
 event commands, skills past the twelfth an actor or enemy has, `extraIds`).
 Measured 2026-10-28 with `--preload-id` in ASSEMBLER TEST PROJECT: anims 3 and 998
 were loaded before the cast on both paths, freeze 6 ms (998 uncovered: load ~600 ms).
+
+**HDR effects.** An HDR animation names only its `-hdr` effect; the engine reads the sidecar when the cast starts
+and only then loads the companion it names (§ HDR effect overlay), so a preloaded HDR effect with a companion that has
+file materials still stopped the game for the companion's load. Since 2026-11-11 the plugin asks the engine's sidecar
+cache (`ReactorHdrOverlay.request`, the built-in overlay of 0.99.2+) for every effect it preloads and loads the
+companion and the fallback twin with it (`hdrCompanions`, `hdrTwins`, both on by default; `last.hdr` lists them). A
+project copy from before that date does not: copy the plugin again. Measured on Ruin r8 black-and-white HDR (1356,
+companion Ruin-r8bw-body), three runs each with `--preload-id`: before, one 825-866 ms main-thread stall in every run;
+after, none (longest task 66 ms), and the battle became ready after ~2.04 s instead of ~0.6 s (companion and twin
+compile their materials behind the transition; `hdrTwins` off saves the twin's share on machines that always run HDR).
+`run.js`'s `freeze` figure missed that stall in half the old runs: the companion's load sometimes lands a few frames
+after the effect has started, where only `longTasksMs` and `frameMs.max` show it, so read those for an HDR effect.
+With Git Bash, pass `--override /js/plugins/...=file` under `MSYS_NO_PATHCONV=1`, or the leading `/` is rewritten into
+a Windows path and the override silently serves nothing.
 
 Install: copy it into a project's `js/plugins/` and add an entry to `$plugins` in
 `js/reactor_plugins.js` (`"name": "ReactorEffectPreload", "status": true`, plus
@@ -2952,6 +2974,17 @@ UE View buffer, for dating captures: the time between them, and which belong to 
 default 3 s, starts a new one). A capture's frame number does not convert to time (85, 67 and 115 "fps" within one
 BD2 cast). The default offset 2136 is UE 4.23 (BD2), where differences match particle-age differences to about 1 ms;
 for another engine, `--find` lists the floats that rise through the captures, so check a candidate against known ages.
+
+`rdcdigest.py camera [-c ID] [--indices N,..] [--eid E]` reads each capture's game camera from the UE 4.2x View buffer:
+- **Pitch and vertical field.** The buffer is the one whose TranslatedWorldToView (byte 192) is a rotation and whose
+  ViewToClip (byte 448) is an infinite reversed-Z perspective.
+- **With draws:** for every instance it unprojects the post-VS vertices to camera-relative world space and prints:
+  - the angle the camera sees the instance's centre from;
+  - the lean of a plane fitted to it, from level;
+  - its radius and distance;
+  - a median `--view-pitch` suggestion.
+- **Lean ~0 means a flat ground mesh,** whose angle is the view tilt a build needs: § Building a Cascade effect,
+  calibration. OT2: `--indices 1008,768,432` (Ring_B, Ring_A, Circle_B), about 7 deg for most skills.
 
 **The store lives beside the captures:** `<folder of the .rdc>/rdcdigest/`, one
 per capture folder (the user's rule, 2026-10-19). Pass it as `--store` to every
