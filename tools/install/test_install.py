@@ -111,6 +111,12 @@ def main():
     require(r.returncode == 0 and added[:-1] == shifted and added[-1]['displayType'] == 2 and added[-1]['offsetX'] == -8
             and added[-1]['offsetY'] == 130, r.stdout + r.stderr)
     passed += 1; print('PASS --offset-x / --offset-y on a new animation; other entries unchanged')
+    r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(spec),
+                        '--dest', 'Edited/Screen/T', '--id', str(added[-1]['id']), '--replace', '--scale', '53',
+                        '--tool', str(a.tool), '--work', str(work / 'stage-screen')], capture_output=True, text=True)
+    scaled = json.loads((project / 'data/Animations.json').read_text())
+    require(r.returncode == 0 and scaled[:-1] == added[:-1] and scaled[-1] == dict(added[-1], scale=53), r.stdout + r.stderr)
+    passed += 1; print('PASS --scale on --replace --id sets that animation\'s scale only')
 
     png(src / 'tex/Glow.png', 64)          # regenerated under the same name: the project's copy is now stale
     out = install('--replace', code=1)

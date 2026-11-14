@@ -21,6 +21,9 @@
   python tools/rdcdigest/rdcdigest.py clock [-c ID] [--offset B] [--cast-gap S] [--find] [--json]
                                                                     the game clock in each capture's UE View buffer:
                                                                     time between captures, and which share a cast
+  python tools/rdcdigest/rdcdigest.py camera [-c ID] [--indices N,..] [--eid E]
+                                                                    the UE camera's pitch and field; with draws, the
+                                                                    angle it sees each instance from (an effect's view tilt)
   python tools/rdcdigest/rdcdigest.py gpu ID [--top N] [--kept]     per-event GPU time on the replay machine
   python tools/rdcdigest/rdcdigest.py stats                         store size and blobs shared across captures
 
@@ -1004,6 +1007,89 @@ def view_buffer(m):
     return None, None
 
 
+def view_camera(m):
+    """The camera of a UE 4.2x capture: (eid, R, sx, sy, jitter) from the first draw binding a View buffer (512+ bytes,
+    TranslatedWorldToView a rotation at byte 192, ViewToClip a perspective at byte 448: row 30 = (jx, jy, 0, 1)).
+    R's rows are the view's right, up and forward axes in UE world (Z up); sx, sy the projection's x / y scale.
+    None when no draw binds one."""
+    data = m['tables']['cbdata']
+    for r in m['draws']:
+        for st in ('vs', 'ps'):
+            for cb in (r.get('shaders', {}).get(st) or {}).get('cbuffers') or []:
+                if not cb.get('data') or cb['data'] not in data:
+                    continue
+                raw = bytes.fromhex(data[cb['data']])
+                if len(raw) < 512:
+                    continue
+                M = np.array([struct.unpack_from('<3f', raw, 192 + 16 * i) for i in range(3)], np.float64)
+                P = np.array([struct.unpack_from('<4f', raw, 448 + 16 * i) for i in range(4)], np.float64)
+                if not np.allclose(M @ M.T, np.eye(3), atol=1e-3) or P[0, 0] <= 0 or P[1, 1] <= 0 or abs(P[2, 3] - 1) > 1e-4 \
+                        or abs(P[2, 2]) > 1e-4:
+                    continue
+                return r['eid'], M.T, float(P[0, 0]), float(P[1, 1]), (float(P[2, 0]), float(P[2, 1]))
+    return None
+
+
+def camera_relative(clip, cam):
+    """Post-VS clip positions (n, 4) -> camera-relative UE world positions (n, 3), for a perspective with infinite
+    reversed Z (UE 4.2x): view = ((x - w jx) / sx, (y - w jy) / sy, w)."""
+    _, R, sx, sy, (jx, jy) = cam
+    c = np.asarray(clip, np.float64)
+    w = c[:, 3]
+    return np.stack([(c[:, 0] - w * jx) / sx, (c[:, 1] - w * jy) / sy, w], 1) @ R
+
+
+def seen_from(X):
+    """One instance's camera-relative world vertices -> the angle the camera sees its centre from (degrees above the
+    horizontal through the centre: the view tilt of a flat thing lying there), distance, flat-fit lean from level
+    (degrees) and outer radius in that plane."""
+    c = X.mean(0)
+    n = np.linalg.svd(X - c)[2][2]
+    n = -n if n[2] < 0 else n
+    d = X - c
+    return {'angle': float(np.degrees(np.arcsin(-c[2] / np.linalg.norm(c)))), 'distance': float(np.linalg.norm(c)),
+            'lean': float(np.degrees(np.arccos(min(1.0, n[2])))),
+            'radius': float(np.linalg.norm(d - np.outer(d @ n, n), axis=1).max())}
+
+
+def camera(args):
+    """The game camera of each capture (pitch, vertical field) and, with --indices / --eid, the angle it sees each
+    instance of those draws from: for an effect's flat ground mesh (a ring lying level), that angle is the view tilt
+    an Effekseer port needs (OT2 builds: --view-pitch -<angle>; our battle view sees the root's ground edge-on)."""
+    want = {int(x) for x in (args.indices or '').split(',') if x}
+    eids = set(args.eid or [])
+    angles = []
+    for cid, m in sorted(manifests(args.store, set(args.capture) if args.capture else None), key=lambda kv: natural(kv[0])):
+        cam = view_camera(m)
+        if cam is None:
+            print('%s: no draw binds a UE View buffer' % cid)
+            continue
+        fw = cam[1][2]
+        print('%-36s pitch %6.2f deg %s  vertical field %5.2f deg  (View buffer of eid %d)' % (
+            cid, abs(np.degrees(np.arcsin(fw[2]))), 'down' if fw[2] <= 0 else 'up', 2 * np.degrees(np.arctan(1 / cam[3])), cam[0]))
+        if not want and not eids:
+            continue
+        for r in m['draws']:
+            if r.get('kind') != 'draw' or not r.get('postvs') or not (r.get('indices') in want or r['eid'] in eids):
+                continue
+            pv, lay, f = postvs_data(args.store, m, r)
+            if f is None:
+                continue
+            for i in range(f.shape[0]):
+                clip = f[i, :, :4]
+                clip = clip[clip[:, 3] > 0]
+                if len(clip) < 3:
+                    continue
+                s = seen_from(camera_relative(clip, cam))
+                angles.append(s['angle'])
+                print('    eid %6d inst %3d  seen from %6.2f deg  lean %5.2f  radius %8.1f  distance %8.1f' % (
+                    r['eid'], i, s['angle'], s['lean'], s['radius'], s['distance']))
+    if angles:
+        a = float(np.median(angles))
+        print('median over %d instance(s): seen from %.2f deg -> --view-pitch %.0f (only for flat, level ground meshes: '
+              'check the lean column)' % (len(angles), a, -a))
+
+
 def natural(s):
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)]
 
@@ -1211,6 +1297,11 @@ def main():
     p.add_argument('--find', action='store_true', help='list the offsets that rise through the captures')
     p.add_argument('--json', action='store_true')
     p.set_defaults(fn=clock)
+    p = sub.add_parser('camera', help='game camera pitch and field, and the angle it sees draws from')
+    p.add_argument('-c', '--capture', action='append', help='only these capture ids (repeatable; default all)')
+    p.add_argument('--indices', help='draws with these index counts, comma list (OT2 rings: Ring_B 1008, Ring_A 768, Circle_B 432)')
+    p.add_argument('--eid', type=int, action='append', help='this draw (repeatable)')
+    p.set_defaults(fn=camera)
     p = sub.add_parser('gpu')
     p.add_argument('capture')
     p.add_argument('--top', type=int, default=30)

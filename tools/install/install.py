@@ -220,6 +220,8 @@ def main():
     p.add_argument('--offset-x', type=int, help="the animation's offsetX (screen px); kept when omitted (0 for new animations)")
     p.add_argument('--offset-y', type=int, help="the animation's offsetY (screen px, + is down); kept when omitted (0 for new "
                    'animations). a UE 4.23 study effect: displayType 2, offsetY 130 puts its dome on the ground mid-frame')
+    p.add_argument('--scale', type=int, help="the animation's scale (%%); kept when omitted (100 for new animations). OT2: "
+                   "ot2measure.py game prints the one that draws the game's screen share")
     p.add_argument('--tool', type=Path, default=ROOT / 'src/Niagara2Efk/bin/x64/Release/net9.0/Niagara2Efk.dll')
     p.add_argument('--catalogue', type=Path, default=ROOT / 'out/catalogue.json')
     p.add_argument('--work', type=Path, help='staging folder (default out/install/<effect name>)')
@@ -325,7 +327,7 @@ def main():
         print('INSTALL OK: %s (no animation; Animations.json unchanged)' % dest)
         return
     print('4. animation')
-    offsets = {k: v for k, v in (('offsetX', a.offset_x), ('offsetY', a.offset_y)) if v is not None} or None
+    offsets = {k: v for k, v in (('offsetX', a.offset_x), ('offsetY', a.offset_y), ('scale', a.scale)) if v is not None} or None
     anim_id = (repoint_animation(anim_path, a.id, dest, a.display_type, offsets) if a.id is not None
                else add_animation(anim_path, dest, a.name, a.replace, a.display_type, offsets))
 

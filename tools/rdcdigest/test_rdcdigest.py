@@ -282,6 +282,43 @@ def main():
         rdcdigest.clock(argparse.Namespace(store=cs, capture=['c2', 'c10', 'c30'], offset=2136, cast_gap=3.0, find=True, json=False))
     check('clock --find lists the rising float', re.search(r'^\s+2136\s', out.getvalue(), re.M) is not None, out.getvalue())
 
+    # camera: a synthetic UE View buffer 3 deg down; a level ring 300 cm below the camera's height, 3000 cm ahead,
+    # projected with it, comes back at its own angle (asin(300 / distance)), level, at its radius
+    pitch = np.radians(3.0)
+    Rv = np.array([[0, 1, 0], [np.sin(pitch), 0, np.cos(pitch)], [np.cos(pitch), 0, -np.sin(pitch)]])  # right, up, forward
+    sx, sy = 3.5, 6.2222
+    raw = bytearray(8192)
+    for i in range(3):
+        struct.pack_into('<4f', raw, 192 + 16 * i, *Rv.T[i], 0)
+    for i, row in enumerate(((sx, 0, 0, 0), (0, sy, 0, 0), (0, 0, 0, 1), (0, 0, 10, 0))):
+        struct.pack_into('<4f', raw, 448 + 16 * i, *row)
+    ring = np.array([[3000 + 200 * np.cos(t), 200 * np.sin(t), -300] for t in np.linspace(0, 2 * np.pi, 48, endpoint=False)])
+    v = ring @ Rv.T
+    clip = np.stack([v[:, 0] * sx, v[:, 1] * sy, np.full(len(v), 10.0), v[:, 2]], 1).astype('<f4')
+    st = os.path.join(work, 'camstore')
+    os.makedirs(os.path.join(st, 'captures', 'cam1'))
+    os.makedirs(os.path.join(st, 'blobs', 'postvs'))
+    clip.tofile(os.path.join(st, 'blobs', 'postvs', 'ring.bin'))
+    small = bytearray(256)
+    struct.pack_into('<9f', small, 192, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+    man = {'tables': {'cbdata': {'s': small.hex(), 'v': raw.hex()}, 'postvs_layout': {'L': []}}, 'draws': [
+        {'eid': 3, 'kind': 'draw', 'shaders': {'vs': {'cbuffers': [{'data': 's'}]}}},
+        {'eid': 7, 'kind': 'draw', 'indices': 1008, 'keep': True, 'shaders': {'vs': {'cbuffers': [{'data': 'v'}]}},
+         'postvs': {'vs': {'vertex': 'ring', 'stride': 16, 'vertices': 48, 'layout': 'L'}}}]}
+    json.dump(man, open(os.path.join(st, 'captures', 'cam1', 'manifest.json'), 'w'))
+    cam = rdcdigest.view_camera(man)
+    check('camera: the View buffer by rotation and perspective, not a 256-byte rotation', cam is not None and cam[0] == 7, cam)
+    s = rdcdigest.seen_from(rdcdigest.camera_relative(clip, cam))
+    want = np.degrees(np.arcsin(300 / np.linalg.norm([3000, 0, 300])))
+    check('camera: a level ring comes back at its angle, level, at its radius',
+          abs(s['angle'] - want) < 0.01 and s['lean'] < 0.01 and abs(s['radius'] - 200) < 0.1, (s, want))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rdcdigest.camera(argparse.Namespace(store=st, capture=None, indices='1008', eid=None))
+    text = out.getvalue()
+    check('camera command: pitch, field and the suggested --view-pitch',
+          'pitch   3.00 deg down' in text and 'vertical field 18.26' in text and '--view-pitch -6' in text, text)
+
     import index_tests
     index_tests.run(work, check, dds_dx10)
 

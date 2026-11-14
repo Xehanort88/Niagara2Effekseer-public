@@ -41,6 +41,20 @@
  * @default
  * @desc Comma-separated animation IDs, e.g. 317,318.
  *
+ * @param hdrCompanions
+ * @text HDR effects: load the companion too
+ * @type boolean
+ * @default true
+ * @desc An HDR effect's sidecar (.hdr.json) can name a companion effect that
+ * plays with it. Without this the companion loads in the middle of the cast.
+ *
+ * @param hdrTwins
+ * @text HDR effects: load the fallback twin too
+ * @type boolean
+ * @default true
+ * @desc The twin plays where HDR cannot run. Loading it makes the battle open
+ * a little later on machines that never need it; turn off to skip it.
+ *
  * @param log
  * @text Log to console
  * @type boolean
@@ -71,6 +85,11 @@
  * a project with Graphics.effekseerInScene = false, load into the overlay as
  * before. Effects in the in-scene layer stay loaded for the whole session.
  *
+ * HDR effects (RPG Reactor 0.99.2 or later): the animation names only the HDR
+ * effect, and its sidecar names a companion and a fallback twin. The sidecar
+ * is read while the battle opens (through the engine's own sidecar cache, so
+ * the cast does not fetch it again) and both are loaded with the effect.
+ *
  * No commands. Measured with tools/ingame in Niagara2Effseeker (README).
  */
 
@@ -85,6 +104,8 @@
         items: bool(p.items, true),
         enemySkills: bool(p.enemySkills, true),
         troopEvents: bool(p.troopEvents, true),
+        hdrCompanions: bool(p.hdrCompanions, true),
+        hdrTwins: bool(p.hdrTwins, true),
         extraIds: String(p.extraIds || "").split(",").map((s) => Number(s.trim())).filter((n) => n > 0),
         log: bool(p.log, false),
     };
@@ -92,7 +113,7 @@
     const EffectPreload = {
         params,
         enabled: true,
-        last: null, // { requested: [...], failed: [...], startedMs, readyMs, timedOut }
+        last: null, // { requested: [...], failed: [...], hdr: [companions and twins asked for], startedMs, readyMs, timedOut }
     };
     window.ReactorEffectPreload = EffectPreload;
 
@@ -185,25 +206,66 @@
         record.requested.push(name);
     }
 
+    // Check one effect file and start its load, once per preload.
+    function want(record, name) {
+        if (record.seen.has(name)) return;
+        record.seen.add(name);
+        const url = EffectManager.makeUrl(name);
+        if (isCached(name, url)) return;
+        record.checking++;
+        fileExists(url, (exists) => {
+            record.checking--;
+            if (exists) startLoad(record, name, url);
+            else {
+                record.failed.push(name);
+                if (params.log) console.warn(`[${pluginName}] effect file not found: ${url}`);
+            }
+        });
+    }
+
+    // An HDR effect plays with files its animation does not name: the sidecar
+    // <effect>.hdr.json, and the companion and fallback twin the sidecar names
+    // (a bare name is beside the effect, a name with "/" is under effects/, as
+    // the engine resolves them). The engine reads the sidecar when the cast
+    // starts and loads the companion then, which froze the cast for as long as
+    // an unpreloaded effect. Ask the engine's own sidecar cache now, so the
+    // cast finds the sidecar read and the companion loaded. An effect that is
+    // already cached is still followed: its companion may not be.
+    function wantHdrExtras(record, name) {
+        const hdr = window.ReactorHdrOverlay;
+        if (!(params.hdrCompanions || params.hdrTwins) || !hdr || typeof hdr.request !== "function") return;
+        let entry = null;
+        try { entry = hdr.request(name); } catch (e) { return; }
+        if (!entry || !entry.promise || typeof entry.promise.then !== "function") return;
+        const beside = (other) => (other.includes("/") ? other : name.slice(0, name.lastIndexOf("/") + 1) + other);
+        record.checking++;
+        entry.promise.then(() => {
+            const sidecar = entry.sidecar;
+            if (!sidecar) return;
+            if (params.hdrCompanions && typeof sidecar.companion === "string" && sidecar.companion) {
+                const companion = beside(sidecar.companion);
+                want(record, companion);
+                try { hdr.request(companion); } catch (e) { /* the cast asks again */ }
+                record.hdr.push(companion);
+            }
+            if (params.hdrTwins && typeof sidecar.fallback === "string" && sidecar.fallback) {
+                want(record, beside(sidecar.fallback));
+                record.hdr.push(beside(sidecar.fallback));
+            }
+        }).catch(() => {}).then(() => { record.checking--; });
+    }
+
     function preload() {
-        const record = { requested: [], failed: [], startedMs: performance.now(), readyMs: null, timedOut: false, checking: 0 };
+        const record = { requested: [], failed: [], hdr: [], seen: new Set(), startedMs: performance.now(), readyMs: null,
+                         timedOut: false, checking: 0 };
         EffectPreload.last = record;
         if (!EffectPreload.enabled || !Graphics.effekseer) return record;
         for (const id of collectAnimationIds()) {
             const animation = $dataAnimations[id];
             const name = animation && animation.effectName;
             if (!name) continue;
-            const url = EffectManager.makeUrl(name);
-            if (isCached(name, url)) continue;
-            record.checking++;
-            fileExists(url, (exists) => {
-                record.checking--;
-                if (exists) startLoad(record, name, url);
-                else {
-                    record.failed.push(name);
-                    if (params.log) console.warn(`[${pluginName}] effect file not found: ${url}`);
-                }
-            });
+            want(record, name);
+            wantHdrExtras(record, name);
         }
         if (params.log) console.log(`[${pluginName}] checking ${record.checking} effect(s)`);
         return record;

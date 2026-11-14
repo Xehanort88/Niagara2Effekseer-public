@@ -117,6 +117,7 @@ SUITES = [
     Suite('cascade-capture', 'tools/cascade/test_capture.py'),
     Suite('cascade-cascade', 'tools/cascade/test_cascade.py'),
     Suite('cascade-digest_source', 'tools/cascade/test_digest_source.py'),
+    Suite('cascade-ot2measure', 'tools/cascade/test_ot2measure.py'),
     Suite('cascade-ot2port', 'tools/cascade/test_ot2port.py'),
     Suite('cascade-sqex', 'tools/cascade/test_sqex.py', work=False),
     Suite('cascade-ue418', 'tools/cascade/test_ue418.py', work=False),
