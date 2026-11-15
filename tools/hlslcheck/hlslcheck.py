@@ -252,8 +252,13 @@ def compile_hlsl(src, name='material', profile='ps_4_0'):
 
 
 def check(path):
-    """('ok' | 'FAIL' | 'SKIP', first messages)."""
+    """('ok' | 'FAIL' | 'SKIP', first messages). A known trap (traps.py: code that compiles but draws wrong in the
+    game, such as an integer literal GLSL ES refuses) fails it before compiling."""
     info = parse_efkmat(Path(path).read_bytes())
+    import traps
+    found = traps.check_code(info['code'])
+    if found:
+        return 'FAIL', 'trap %s' % ' | '.join('%s: %s' % t for t in found)[:300]
     if info['required']:
         return 'SKIP', 'uses built-in gradient/noise/HSV functions (not reproduced here)'
     stages = [('pixel shader', to_hlsl(info), 'ps_4_0')]

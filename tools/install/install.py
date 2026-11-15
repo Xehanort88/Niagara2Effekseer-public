@@ -9,6 +9,8 @@ Steps, each of which stops the install on failure:
      material), listing each: a spec written by a post-step builds on the intermediate effect that step read;
   1. build the spec into a staging folder (--work, default out/install/<name>) and require VERIFY OK;
   2. `lint --strict --catalogue` the staged build;
+  2b. refuse a staged material with a known trap (tools/hlslcheck/traps.py: integer literals GLSL ES refuses, the
+     port's facing test on a depth-squashed normal);
   3. refuse if <project>/effects/<dest>.efkefc exists, unless --replace;
   4. build the spec straight into the project (resources are copied beside it, one shared Texture/ per folder)
      and require it to be byte-identical to the staged build;
@@ -313,6 +315,12 @@ def main():
     print('  ' + (summary[-1] if summary else r.stdout.strip()[-200:]))
     if r.returncode != 0:
         fail('lint exit %d\n%s' % (r.returncode, r.stdout[-1500:]))
+    print('2b. material traps (tools/hlslcheck/traps.py)')
+    mats = sorted(work.rglob('*.efkmat'))
+    r = run([sys.executable, ROOT / 'tools/hlslcheck/traps.py'] + mats) if mats else None
+    print('  ' + ((r.stdout.strip().splitlines() or [''])[-1] if r else 'no file materials'))
+    if r is not None and r.returncode != 0:
+        fail('a material has a known trap (it compiles but draws wrong in the game):\n%s' % r.stdout[-1500:])
 
     print('3. install into ' + str(target))
     print('  ' + build(a.tool, spec, target)[:110])

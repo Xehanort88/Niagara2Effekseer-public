@@ -140,6 +140,15 @@ def retire(a, project, anim_path):
             if side.resolve() not in moving: protected.add(file.resolve())
             elif key == 'companion': candidates.add(file.resolve())
     companions = sorted(candidates - protected - moving)
+    # An effect a remaining HDR sidecar names as its fallback twin (or companion) stays on disk even when its own
+    # animation is retired: the engine needs it beside the HDR effect (2026-11-15: retiring Boost twins 1049/1051 would
+    # have moved the fallback of 1050/1053, which stay).
+    kept_for = {}
+    for i, e, files, shared in plan:
+        for p in list(files):
+            if p.suffix == '.efkefc' and p.resolve() in protected:
+                files.remove(p)
+                kept_for[i] = p
     if plan:
         plan[0][2].extend(file for file in companions if file.is_file())
     orphans = []
@@ -151,6 +160,8 @@ def retire(a, project, anim_path):
         orphans += [f.with_name(f.stem + '.hdr.json') for f in orphans if f.with_name(f.stem + '.hdr.json').is_file()]
     for i, e, files, shared in plan:
         print('  %d %s (%s): %s' % (i, e.get('name'), e['effectName'], 'file kept, another animation plays it' if shared
+                                    else 'file kept, a remaining HDR effect names it as its fallback/companion'
+                                    + (': ' + ', '.join(p.name for p in files) if files else '') if i in kept_for
                                     else ', '.join(p.name for p in files) or 'no file under effects/'))
     for f in orphans:
         print('  no animation plays %s' % f.relative_to(effects).as_posix())

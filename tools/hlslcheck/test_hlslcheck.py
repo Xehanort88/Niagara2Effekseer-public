@@ -92,6 +92,9 @@ def main():
         # the backdrop-read prototype (out/edits/bd2-backdrop-read-20261018, scratch/backmat.py): pass 0 sends its
         # own result through the ending's background fetch with a preprocessor redirect
         'refraction: redirected background fetch': (efkmat(redirect, refraction=1), 'ok', ''),
+        # traps.py: an integer literal in float code compiles as HLSL but GLSL ES (the game) refuses it (2026-11-15)
+        'trap: integer literal': (efkmat(portable.replace('k * f;', 'k * f * 223;')), 'FAIL', 'int-literal'),
+        'trap: the same as a float literal is fine': (efkmat(portable.replace('k * f;', 'k * f * 223.0;')), 'ok', ''),
     }
     for k, (name, (data, want, word)) in enumerate(cases.items()):
         p = work / (re.sub(r'[^A-Za-z0-9.()-]+', '_', name) + '.efkmat')
@@ -114,8 +117,30 @@ def main():
           'efk_background_texture.Sample(efk_background_sampler, distortUV)' in src and 'cameraMat' in src, src[-400:])
     rc = H.main([str(work)])
     check('exit code 1 when a material fails', rc == 1, rc)
+    test_traps(check)
     print('%d failure(s)' % fails)
     return 1 if fails else 0
+
+
+def test_traps(check):
+    """traps.py on code alone (no compiler): each known trap found, its fixed form not, and no false alarm on literals
+    GLSL ES accepts (exponents, array indices, int declarations, comments)."""
+    import traps as T
+    un = ('$F4$ vin1 = $F4$(normalize(normalize(worldNormal) + 5.369427 * dot(normalize(worldNormal), $F3$(0.0, 0.0, 1.0))'
+          ' * $F3$(0.0, 0.0, 1.0)), 1.0);\n')
+    raw = '$F4$ vin8 = $F4$(step(0.0, dot(normalize(worldNormal), normalize(cameraPosition.xyz - worldPos))), 0.0, 0.0, 0.0);\n'
+    fixed = ('$F4$ vin8 = $F4$(step(0.0, dot((normalize(worldNormal) + 39.57 * dot(normalize(worldNormal), $F3$(0.0, 0.0, 1.0))'
+             ' * $F3$(0.0, 0.0, 1.0)), normalize(cameraPosition.xyz - worldPos))), 0.0, 0.0, 0.0);\n')
+    kinds = lambda code: sorted(set(t for t, _ in T.check_code(code)))
+    check('trap: facing test on the squashed worldNormal in an unsquashing material', kinds(un + raw) == ['facing-squash'],
+          kinds(un + raw))
+    check('trap: facing test on the drawn surface\'s normal is fine', kinds(un + fixed) == [], kinds(un + fixed))
+    check('trap: the raw facing test without a depth squash is fine', kinds(raw) == [], kinds(raw))
+    for code, want in (('$F1$ a = vcolor.x * 223;', ['int-literal']), ('$F1$ a = pow(vcolor.x, 2);', ['int-literal']),
+                       ('$F1$ a = 2 * vcolor.x;', ['int-literal']), ('$F1$ a = 1.17459e-06 * vcolor.x - 4.2e+3;', []),
+                       ('$F1$ a = r[2].x * 2.0;', []), ('int i = 3;', []), ('// slots: (2, 2)', []),
+                       ('$F4$ c = $TEX_P0$uv1$TEX_S0$;', []), ('$F1$ a = vcolor.x * 1.80;', [])):
+        check('trap: %r -> %s' % (code, want or 'none'), kinds(code) == want, kinds(code))
 
 
 if __name__ == '__main__':

@@ -2031,7 +2031,8 @@ python tools/install/install.py --project "../ASSEMBLER TEST PROJECT" --spec out
 ```
 
 It builds the spec into a staging folder (`out/install/<name>`, `--work`) and
-requires `VERIFY OK`, runs `lint --strict --catalogue`, refuses if the effect
+requires `VERIFY OK`, runs `lint --strict --catalogue`, refuses a build whose file
+materials have a known trap (`tools/hlslcheck/traps.py`, README § Checking file materials in the editor), refuses if the effect
 already exists (`--replace` reinstalls and keeps its animation), builds straight
 into `<project>/effects/<dest>.efkefc` (textures beside it in the folder's shared
 `Texture/`) and requires that to be byte-identical to the staged build. It then
@@ -2059,7 +2060,8 @@ It refuses an id that a skill, item or weapon (`animationId`) or a Show Animatio
 (212/337 in troops, common events and maps) still uses. It blanks each slot in place as the editor leaves a cleared one,
 so no other animation is renumbered, with the same re-read and line-format checks as the install. It also moves the
 effect file (and an HDR sidecar) to `out/retired/<project>/<stamp>/effects/...`, unless an animation that stays plays
-the same file. `--orphans Edited/<Folder>` also moves that folder's effects that no animation plays (rounds repointed
+the same file or a remaining HDR sidecar names it as its fallback twin or companion (then only the slot is blanked;
+since 2026-11-15, when retiring Boost twins 1049/1051 would have taken the fallback of 1050/1053). `--orphans Edited/<Folder>` also moves that folder's effects that no animation plays (rounds repointed
 or never given an entry). Files are moved, never deleted. Shared `Texture/`, `Model/` and `Materials/` stay: other
 effects in the folder read them, and neither a file's name nor its date says who owns it. `retired.json` keeps the old
 entries and the moved paths, and `--restore` puts both back, as long as the slots are still blank. A range runs over

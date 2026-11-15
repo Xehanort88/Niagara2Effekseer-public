@@ -134,6 +134,30 @@ def main():
             'exit %d\n%s%s' % (r.returncode, r.stdout, r.stderr))
     passed += 1; print('PASS a spec whose source effect or resources are gone is refused, each missing file named')
 
+    # 2b: a material with a known trap (an integer literal GLSL ES refuses) is refused before anything reaches the project
+    sys.path.insert(0, str(ROOT / 'tools/hlslcheck'))
+    from test_hlslcheck import efkmat
+    tail = ('$F3$ worldPositionOffset = $F3$(0.0,0.0,0.0);\n$F3$ baseColor = $F3$(0.0,0.0,0.0);\n$F1$ metallic = 0.0;\n'
+            '$F1$ roughness = 1.0;\n$F1$ ambientOcclusion = 1.0;\n$F1$ opacityMask = 1.0;\n$F1$ refraction = 1.0;\n')
+    for nm, factor, want in (('Trap', '223', 1), ('Fine', '223.0', 0)):
+        (src / 'mat').mkdir(exist_ok=True)
+        (src / 'mat' / (nm + '.efkmat')).write_bytes(efkmat('$F3$ emissive = vcolor.xyz * %s;\n$F1$ opacity = vcolor.w;\n' % factor,
+                                                             textures=(), uniforms=(), cd=(0, 0)))
+        ms = src / ('M%s.edit.json' % nm)
+        ms.write_text(json.dumps({'source': 'blank.efkefc', 'edits': [{'node': '0', 'set': {
+            'RendererCommonValues/Material': 'File', 'RendererCommonValues/MaterialFile/Path': 'mat/%s.efkmat' % nm}}]}))
+        before = (project / 'data/Animations.json').read_bytes()
+        r = subprocess.run([sys.executable, str(ROOT / 'tools/install/install.py'), '--project', str(project), '--spec', str(ms),
+                            '--dest', 'Edited/Mat/' + nm, '--name', 'Mat ' + nm, '--tool', str(a.tool), '--work', str(work / ('stage-' + nm))],
+                           capture_output=True, text=True)
+        if want:
+            require(r.returncode == 1 and 'known trap' in r.stdout and 'int-literal' in r.stdout
+                    and not (project / 'effects/Edited/Mat' / (nm + '.efkefc')).exists()
+                    and (project / 'data/Animations.json').read_bytes() == before, 'exit %d\n%s%s' % (r.returncode, r.stdout, r.stderr))
+        else:
+            require(r.returncode == 0 and 'TRAPS: 1 material(s), 0 with a trap' in r.stdout, 'exit %d\n%s%s' % (r.returncode, r.stdout, r.stderr))
+    passed += 1; print('PASS a material with a known trap (vcolor.xyz * 223) is refused before install; 223.0 installs')
+
     hdr_dir = project / 'effects/Edited/HDR'
 
     def put(dest, spec_path, *extra, code=0, name=None):
@@ -283,6 +307,15 @@ def main():
     require((hdr_dir/'Body.efkefc').exists(),'a companion used by another animation must stay')
     retire('--restore',str(archive4/'retired.json'),'--apply')
     passed+=1;print('PASS sidecar and animation references protect a shared companion')
+    # a fallback twin's own animation can be retired, but its file stays while a remaining HDR effect names it
+    twin_id=[e['id'] for e in json.loads(anim_file.read_text()) if e and e.get('effectName')=='Edited/HDR/T-ldr'][0]
+    archive5=work/'retired-twin'
+    r=subprocess.run([sys.executable,str(ROOT/'tools/install/retire.py'),'--project',str(project),'--ids',str(twin_id),
+                      '--archive',str(archive5),'--apply'],capture_output=True,text=True)
+    require(r.returncode==0 and (hdr_dir/'T-ldr.efkefc').exists() and 'names it as its fallback' in r.stdout
+            and json.loads(anim_file.read_text())[twin_id]['effectName']=='',r.stdout+r.stderr)
+    retire('--restore',str(archive5/'retired.json'),'--apply')
+    passed+=1;print('PASS retiring a fallback twin\'s animation keeps its file while the HDR effect that names it stays')
     print('RESULT: %d passed, 0 failed' % passed)
 
 
