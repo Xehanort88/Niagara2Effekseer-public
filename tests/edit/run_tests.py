@@ -21,7 +21,7 @@ CURVE = LOCATION + "/Y"
 SCALE = "ScalingValues/SingleFCurve"
 TIME_CURVE = SCALE + "/S"
 KNOWN = {
-    "top": "retime, source, name, allowMissingResources, endFrame, edits, procedural",
+    "top": "retime, source, name, allowMissingResources, endFrame, edits, procedural, equations",
     "retime": "factor",
     "edit": "node, expect, note, set, tint, add, shift, keys",
     "tint": "hue, saturation, subtractiveOpposite",
@@ -29,7 +29,11 @@ KNOWN = {
     "shift": "curve, from, by, percentOfLife",
     "keys": "curve, points",
     "procedural": "index, add, from, expect, note, set",
+    "equations": "index, add, expect, code, note",
 }
+PULSE = "@O.x = @P.x * (1.0 + 0.5 * sin(@GTime))\n@O.y = @P.y * 2.0\n@O.z = @P.z"
+PVA = "ScalingValues/PVA/Scale"
+EASING = "ScalingValues/Easing"
 
 
 def require(condition, message):
@@ -240,6 +244,9 @@ class Suite:
         elif level == "procedural":
             spec["procedural"] = [{"index": 0}]
             part, where = spec["procedural"][0], "in procedural[0]"
+        elif level == "equations":
+            spec["equations"] = [{"add": "A", "code": "@O.x = 1"}]
+            part, where = spec["equations"][0], "in equations[0]"
         elif level == "edit":
             part, where = op, 'in edits[0] (node "0")'
         else:
@@ -299,6 +306,102 @@ class Suite:
                 require(f"{key} = {value}" in lines[wide:], f"copied model 1 missing {key} = {value}")
         require("Shape/Point2 = (0.9, 0.3)" in lines[wide:], "copied model 1 lost its own change")
         return out
+
+    def equations_add(self):
+        # One equation shared by min and max of a PVA scale (its @P is the value
+        # the reference sits on) and by an Easing's start; a second changed by index.
+        out = self.edit({"source": str(self.base), "equations": [
+            {"add": "Pulse", "code": PULSE},
+            {"add": "Other", "code": "@O.x = 1"},
+            {"index": 1, "expect": "Other", "code": "@O.x = @P.x\n@O.y = @P.y\n@O.z = @P.z * 0.5"}],
+            "edits": [{"node": "0", "set": {
+                "ScalingValues/Type": "PVA", PVA + "/X": [0.5, 2], PVA + "/Y": [1, 3], PVA + "/Z": 1,
+                PVA + "/DynamicEquationMin": "Pulse", PVA + "/DynamicEquationMax": 0}},
+                {"node": "root", "add": {"from": "0", "name": "Eased"}, "set": {
+                "ScalingValues/Type": "Easing", EASING + "/Start/DynamicEquationMax": "Other",
+                EASING + "/End/DynamicEquationMin": "Pulse"}}]})
+        contains(self.edit_stdout, "VERIFY OK: equation 0 'Pulse' name and code read back, compiles")
+        contains(self.edit_stdout, "VERIFY OK: equation 1 'Other' name and code read back, compiles")
+        dump = self.tool("dump", out).stdout
+        lines = dump.splitlines()
+        for key, value in [(PVA + "/DynamicEquationMin", '#0 "Pulse"'), (PVA + "/DynamicEquationMax", '#0 "Pulse"'),
+                           (PVA + "/IsDynamicEquationEnabled", "true"), (PVA + "/X", "[0.5..2]")]:
+            self.line(dump, key, value)
+        eased = lines[lines.index("### 1 Eased"):]
+        for key, value in [(EASING + "/Start/DynamicEquationMax", '#1 "Other"'),
+                           (EASING + "/End/DynamicEquationMin", '#0 "Pulse"'),
+                           (EASING + "/Start/IsDynamicEquationEnabled", "true")]:
+            require(f"{key} = {value}" in eased, f"node 1 missing {key} = {value}")
+        require(f"{EASING}/Start/DynamicEquationMin = (none)" not in eased, "dump printed an unset reference")
+        at = lines.index("### equation 0 Pulse")
+        require(lines[at + 1] == "Code = " + json.dumps(PULSE), f"equation code line {lines[at + 1]!r}")
+        contains(dump, "### equation 1 Other")
+        # A node dump lists only the equations its values reference.
+        only = self.dump(out)
+        require("### equation 0 Pulse" in only and "### equation 1" not in only, "node dump listed an unused equation")
+        # A later edit keeps the equations and their references, and can clear one.
+        again = self.edit({"source": str(out), "edits": [{"node": "0", "set": {PVA + "/DynamicEquationMax": None}}]})
+        kept = self.dump(again)
+        self.line(kept, PVA + "/DynamicEquationMin", '#0 "Pulse"')
+        require(not any(l.startswith(PVA + "/DynamicEquationMax") for l in kept.splitlines()), "cleared reference still saved")
+        return out
+
+    def equations_refused(self, case):
+        spec = {"source": str(self.base), "edits": []}
+        pulse = [{"add": "Pulse", "code": PULSE}]
+        if case == "add_and_index":
+            spec["equations"], message = [{"add": "A", "index": 0, "code": "@O.x = 1"}], "not both"
+        elif case == "add_without_code":
+            spec["equations"], message = [{"add": "A"}], "`add` needs `code`"
+        elif case == "does_not_compile":
+            spec["equations"], message = [{"add": "A", "code": "@O.x = @Q.x"}], "equations[0] ('A'): the code does not compile"
+        elif case == "duplicate_name":
+            spec["equations"], message = pulse * 2, "an equation named 'Pulse' already exists at index 0"
+        elif case == "no_index":
+            spec["equations"], message = [{"index": 0, "code": "@O.x = 1"}], "no equation at index 0 (0 in the project)"
+        elif case == "wrong_expect":
+            spec["equations"] = pulse + [{"index": 0, "expect": "B", "code": "@O.x = 1"}]
+            message = "equation 0 is named 'Pulse', spec expected 'B'"
+        elif case == "list_full":
+            spec["equations"] = [{"add": f"E{i}", "code": "@O.x = 1"} for i in range(17)]
+            message = "equations[16]: the project's equation list is full (16, the editor's limit)"
+        elif case == "unknown_name":
+            spec["equations"] = pulse
+            spec["edits"] = [{"node": "0", "set": {PVA + "/DynamicEquationMin": "B"}}]
+            message = "no dynamic equation named 'B' (the project has: 0 'Pulse')"
+        else:  # single_pva: the runtime keeps no reference for a SinglePVA value
+            spec["equations"] = pulse
+            spec["edits"] = [{"node": "0", "set": {"ScalingValues/SinglePVA/Scale/DynamicEquationMin": "Pulse"}}]
+            message = "ScalingValues/SinglePVA/Scale takes no dynamic equation in the runtime"
+        contains(self.edit(spec, code=1).stderr, message)
+
+    def equations_carry(self, inputs=False):
+        # A node copied out of another effect carries the equations its values reference: appended here (after this
+        # spec's own), references repointed; one that reads the project's inputs is refused (only the assembler
+        # reconciles inputs).
+        donor = self.edit({"source": str(self.base), "equations": [
+            {"add": "Pulse", "code": "@O.x = @P.x * @In0" if inputs else PULSE}],
+            "edits": [{"node": "0", "set": {"ScalingValues/Type": "PVA", PVA + "/DynamicEquationMin": "Pulse"}}]})
+        spec = {"source": str(self.base), "equations": [{"add": "Local", "code": "@O.x = @P.x"}],
+                "edits": [{"node": "0", "set": {"ScalingValues/Type": "PVA", PVA + "/DynamicEquationMax": "Local"}},
+                          {"node": "root", "add": {"file": str(donor), "from": "0", "name": "Carried"}}]}
+        if inputs:
+            contains(self.edit(spec, code=1).stderr, "uses dynamic equations that read the project's inputs")
+            return
+        out = self.edit(spec)
+        contains(self.edit_stdout, "carried 1 dynamic equation reference(s) from " + donor.name + " (2 equation(s) in the project now)")
+        dump = self.tool("dump", out).stdout
+        lines = dump.splitlines()
+        carried = lines[lines.index("### 1 Carried"):]
+        require(f'{PVA}/DynamicEquationMin = #1 "Pulse"' in carried, "carried reference not repointed to #1")
+        self.line(dump, PVA + "/DynamicEquationMax", '#0 "Local"')
+        at = lines.index("### equation 1 Pulse")
+        require(lines[at + 1] == "Code = " + json.dumps(PULSE), "carried equation code differs")
+
+    def equations_warnings(self):
+        out = self.edit({"source": str(self.base), "equations": [{"add": "Unused", "code": "@O.x = 1"}]})
+        contains(self.edit_stdout, "WARNING: equation 0 'Unused' was added but no value references it")
+        contains(self.tool("dump", out).stdout, "### equation 0 Unused")
 
     def procedural_refused(self, case):
         spec = {"source": str(self.base), "edits": []}
@@ -699,6 +802,13 @@ class Suite:
                      "duplicate_name", "unknown_name", "ambiguous_name"):
             yield "procedural_refused_" + case, lambda case=case: self.procedural_refused(case)
         yield "procedural_unused_and_switched_off_warn", self.procedural_warnings
+        yield "equations_add_change_reference_and_clear", self.equations_add
+        for case in ("add_and_index", "add_without_code", "does_not_compile", "duplicate_name", "no_index",
+                     "wrong_expect", "list_full", "unknown_name", "single_pva"):
+            yield "equations_refused_" + case, lambda case=case: self.equations_refused(case)
+        yield "equations_unused_warn", self.equations_warnings
+        yield "equations_carried_by_foreign_add", self.equations_carry
+        yield "equations_reading_inputs_refused_in_foreign_add", lambda: self.equations_carry(inputs=True)
         yield "procedural_carried_by_foreign_add", self.procedural_carry
         yield "blank_base_is_neutral", self.blank_base
         yield "add_from_blank_file_is_fresh", self.blank_fresh_copy

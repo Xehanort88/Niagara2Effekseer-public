@@ -1100,7 +1100,41 @@ An `add` op with `"file"` (a node copied out of another effect) carries the
 procedural models that subtree references: each definition is appended to this
 effect's list and the pasted references are repointed (the assembler's repair).
 Identical definitions carried by several adds in one spec share one model.
-Subtrees using dynamic equations are still refused; use the assembler for those.
+Dynamic equations the subtree references are carried the same way (appended, references repointed; effectjob's
+combine relies on it for builds with `--component-scale-curve`); a subtree whose equations read the project's inputs
+(`@In0`..`@In3`, `@1`..`@4`) is still refused: use the assembler for those.
+
+**Dynamic equations.** A spec's top-level `"equations"` list changes or creates the project's dynamic equations (the
+editor's Dynamic Parameters window, at most 16 per effect). It runs first, so a value can reference an equation the
+same spec creates:
+
+```json
+{ "source": "Base.efkefc",
+  "equations": [
+    { "add": "Pulse", "code": "s = 1.0 + 0.7 * sin(6.2831853 * @GTime)\n@O.x = @P.x * s\n@O.y = @P.y * s\n@O.z = @P.z * s" },
+    { "index": 0, "expect": "Pulse", "code": "@O.x = @P.x\n@O.y = @P.y\n@O.z = @P.z" } ],
+  "edits": [ { "node": "0", "set": {
+      "ScalingValues/PVA/Scale/DynamicEquationMin": "Pulse", "ScalingValues/PVA/Scale/DynamicEquationMax": 0 } } ] }
+```
+
+- `add` (unique name, with `code`) appends; `index` (with `expect` as a guard) changes the code. Every equation
+  written is compiled the way the exporter compiles it and refused if it does not compile: the exporter would write it
+  as empty bytecode and the runtime would keep the stored number without a word. VERIFY reads each back (name, code,
+  still compiles) and checks every value's reference reaches the same equation after saving.
+- The code (`EffekseerCore/InternalScript`): `@O.x`..`@O.w` out; `@P.x`..`@P.w` the value the reference sits on (its
+  min, its max or the fixed value: one equation serves both ends of a range); `@GTime` the effect's time in seconds
+  (updated frames / 60, Effekseer.Parameters.cpp ApplyEq); `@PTime` the parent's age in seconds; `@In0`..`@In3` the
+  project's inputs; temporaries (`s = ...`); `sin`, `cos`, `rand`, `step(edge, x)` (x >= edge: 1).
+- A value's `DynamicEquation` (Fixed vectors), `DynamicEquationMin` / `DynamicEquationMax` (ranges) take an equation
+  index, a unique name, or `null` to clear; setting one switches the value's `IsDynamicEquationEnabled` on (read back
+  too). Only values the editor offers an equation on are accepted (`CanSelectDynamicEquation`): SinglePVA,
+  SingleEasing and the FCurve types have no reference in the runtime (Effekseer.Scaling.h) and are refused.
+- When it runs: a Fixed scale's equation every frame (UpdateScaling), so the value follows `@GTime` live; PVA and
+  Easing equations once, when the particle spawns (InitScaling), and the runtime still draws between min and max.
+  Checked in battle: `out/edits/ot2-boost-spawnpulse-20261114` (a row of PVA dots keeps each dot's birth size, a row
+  of Fixed dots pulses together; `scratch/measure_dots.py`).
+- `dump` prints a reference as `#<index> "<name>"` (an unset one prints nothing) and each equation once, as
+  `### equation <i> <name>` with a `Code = "..."` line (JSON string, `\n` line breaks).
 
 `dump` prints a node's reference as `#<index> "<name>"` and each model once at
 the end (a whole-effect dump lists every model; a node dump lists the models
@@ -2058,6 +2092,15 @@ spec that no longer rebuilds the installed file byte for byte (an older tool bui
 `.efkefc` and the resources it names, unchanged. The 25 lightning effects moved into `Edited/Lightning` this way
 (2026-10-07, `out/edits/lightning/move-to-lightning/move.py`): 24 with `--id`, Hit Thunder 306 by copying.
 
+**Build a patched copy of an installed effect from a copy outside the project.** A spec whose `source` is the installed
+`.efkefc` itself, installed into that same folder, fails step 4 with `installed file differs from the staged build`. The
+staged and project builds then write different resource paths into the EDIT chunk, and the dumps are identical. Copy the
+`.efkefc` and its resource folders (`Materials/`, `Texture/`, `Model/`) into your task folder, put new materials beside
+the copy and build from there (`out/edits/ot2-unsquash-normals-20261115/scratch/patch.py`). The failed attempt leaves its
+`.efkefc` in the project: delete that file (nothing plays it yet) before retrying, or step 3 refuses it. The installer
+builds with the 1.70 tool unless `--tool` names the 1.8 one. A source saved by the 1.8 tool needs that (`saved by an
+Effekseer newer than 1.70`).
+
 ## HDR effect overlay
 
 Runtime 20261031.2 adds `bloom.intensityKeys` (`[[frame, intensity], ...]`) to the sidecar: the bloom intensity on
@@ -2246,8 +2289,13 @@ Effekseer draw; no automatic refraction-twin authoring/playback is included.
 
 Tests: `python tools/cascade/test_ot2port.py --work <folder>` and
 `python tools/ingame/test_hdr_overlay.py --work <fresh folder> --project <project> --port <own port>`.
-The plugin test uses an override, a small HDR fixture, a fixed in-memory scene canvas/target, random seed and identical non-MSAA WebGL1 contexts, and
-`tools/ingame/compare.js --threshold 0` to check vanilla animation pixels. It writes no project files.
+The test plays the project's built-in overlay (`js/reactor_hdr_overlay.js`, runtime 20261025.1+; an empty override of that
+file is the vanilla baseline) and appends `plugins/ReactorHdrOverlay.js` only to a project without it: appended to a
+built-in project it replaced the engine's object, and every animation died in `Sprite_Animation.setup` (fixed
+2026-11-15). The fixture, fallback and resize jobs play on the overlay path (`overlay` job flag), which their checks
+read; `hdr-scene` plays the fixture in-scene. It uses a small HDR fixture, a fixed in-memory scene canvas/target,
+random seed and identical non-MSAA WebGL1 contexts, and `tools/ingame/compare.js --threshold 0` to check vanilla
+animation pixels, and ends with a `RESULT: N passed, M failed` line. It writes no project files.
 `node tools/ingame/test_hdr_overlay_unit.js` covers loader/cache/fail-closed control flow.
 `tools/ingame/run.js --headed` runs measurements in a visible Chrome app window; keep it visible and foreground.
 Debug-only `REACTOR_HDR.probeScale`/`probeFrame` records quantized HDR lower bounds through an RGBA8 staging target;

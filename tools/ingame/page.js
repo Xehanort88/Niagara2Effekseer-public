@@ -274,6 +274,19 @@
       await sleep(100);
     }
     if (!window.Graphics || !Graphics.effekseer) throw new Error('game never reached the title screen with Effekseer running');
+    // The battle's backdrop is the title screen as Scene_Title.terminate snaps it (SceneManager.snapForBackground).
+    // Until 2026-11-15 the battle started as soon as a Scene_Title existed: its drawn title text was there at once,
+    // but its background picture (title1, loaded asynchronously) often was not, and the battle drew on black
+    // ("BACKDROP LOST", scene mean 8.3 against 32.3; every time under load, e.g. beside a build). Wait for the scene
+    // to start (Scene_Base.isReady: every image loaded) and its background to be loaded, then two drawn frames.
+    const titleReady = () => {
+      const s = SceneManager._scene;
+      const bitmaps = s ? [s._backSprite1, s._backSprite2].filter((sp) => sp && sp.bitmap).map((sp) => sp.bitmap) : [];
+      return s && s.isStarted && s.isStarted() && ImageManager.isReady() && bitmaps.every((b) => b.isReady());
+    };
+    for (let i = 0; i < 1000 && !titleReady(); i++) await sleep(10);
+    if (!titleReady()) throw new Error('title screen never finished loading its background (the battle backdrop)');
+    for (let f0 = Graphics.frameCount, i = 0; i < 100 && Graphics.frameCount < f0 + 2; i++) await sleep(10);
     hookEngine();
     const anim = $dataAnimations[ID];
     if (!anim || !anim.effectName) throw new Error(`animation ${ID} has no Effekseer effect`);

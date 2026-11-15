@@ -60,6 +60,35 @@ namespace Niagara2Efk
 			/// every node whose Model references an index changes with it.
 			/// </summary>
 			public List<ProceduralOp> procedural { get; set; }
+			/// <summary>
+			/// Optional: change or create the project's dynamic equations (the
+			/// editor's "Dynamic Parameters" list, at most 16). Applied before
+			/// `procedural` and `edits`, so a value can reference an equation
+			/// created here: "ScalingValues/PVA/Scale/DynamicEquationMin": "Pulse".
+			/// Every equation written is compiled as the exporter compiles it and
+			/// refused if it does not compile (the exporter would write it empty).
+			/// </summary>
+			public List<EquationOp> equations { get; set; }
+		}
+
+		class EquationOp : SpecPart
+		{
+			/// <summary>The equation to change. Give this or `add`, not both.</summary>
+			public int? index { get; set; }
+			/// <summary>Create an equation with this (unique) name, appended so no existing index shifts.</summary>
+			public string add { get; set; }
+			/// <summary>Optional: the current Name of the equation at `index`, as a guard.</summary>
+			public string expect { get; set; }
+			/// <summary>
+			/// The code, as the editor's Dynamic Parameters window takes it:
+			/// "@O.x = @P.x * (1 + 0.5 * sin(@GTime))". @P is the value the
+			/// reference sits on (its min, its max or the fixed value), @GTime the
+			/// effect's time in seconds (updated frames / 60), @In0..@In3 the
+			/// project's inputs, @PTime the parent's age in seconds; functions
+			/// sin, cos, rand, step. Required with `add`.
+			/// </summary>
+			public string code { get; set; }
+			public string note { get; set; }
 		}
 
 		class RetimeSpec : SpecPart
@@ -241,6 +270,8 @@ namespace Niagara2Efk
 			}
 			for (int i = 0; i < (spec.procedural?.Count ?? 0); i++)
 				Check(spec.procedural[i], "in procedural[" + i + "]");
+			for (int i = 0; i < (spec.equations?.Count ?? 0); i++)
+				Check(spec.equations[i], "in equations[" + i + "]");
 			return found;
 		}
 
@@ -514,14 +545,18 @@ namespace Niagara2Efk
 					Console.Error.WriteLine("add: no node at path '" + op.add.from + "' in " + file);
 					return 1;
 				}
-				// Procedural models are carried (definition copied, reference
-				// repointed after the paste); dynamic equations also need the
-				// project's inputs, which only the assembler reconciles.
+				// Procedural models and dynamic equations are carried (definition
+				// copied, reference repointed after the paste). An equation that
+				// reads the project's inputs (@In0..@In3, @1..@4) would read this
+				// project's instead, which only the assembler reconciles.
 				bool usesDynamic = false;
 				var refs = HarvestRefs(from, ref usesDynamic);
-				if (usesDynamic)
+				var readsInputs = refs.Where(r => r.Kind == "DynamicEquation" &&
+					System.Text.RegularExpressions.Regex.IsMatch(r.DefinitionXml, @"@(In[0-3]|[1-4])\b")).Select(r => r.KeyPath).ToList();
+				if (readsInputs.Count > 0)
 				{
-					Console.Error.WriteLine("add: " + op.add.from + " in " + file + " uses dynamic equations; use the assembler");
+					Console.Error.WriteLine("add: " + op.add.from + " in " + file + " uses dynamic equations that read the project's inputs (" +
+						string.Join(", ", readsInputs.Take(3)) + "); use the assembler");
 					return 1;
 				}
 				foreignRefs[op] = refs;
@@ -562,6 +597,74 @@ namespace Niagara2Efk
 				catch (Exception e) { Console.Error.WriteLine("retime: " + e.Message); return 1; }
 			}
 			var retimedValues = applied.ToList();
+
+			// Dynamic equations first, so the node ops below can reference an
+			// equation this spec creates.
+			var eqWanted = new List<Tuple<int, string, string>>();   // index, name, code
+			var eqReport = new List<string>();
+			var addedEquations = new List<int>();
+			int equationsAtLoad = Core.Dynamic.Equations.Values.Count;
+			for (int ei = 0; ei < (spec.equations?.Count ?? 0); ei++)
+			{
+				var eop = spec.equations[ei];
+				var collection = Core.Dynamic.Equations;
+				var list = collection.Values;
+				string at = "equations[" + ei.ToString(CultureInfo.InvariantCulture) + "]";
+				DynamicEquation eq;
+				int eqIndex;
+				string before;
+				if (eop.add != null)
+				{
+					if (eop.index.HasValue) { Console.Error.WriteLine(at + ": give `index` to change an equation or `add` to create one, not both"); return 1; }
+					if (eop.add.Trim().Length == 0) { Console.Error.WriteLine(at + ": `add` needs the new equation's name"); return 1; }
+					if (eop.expect != null) { Console.Error.WriteLine(at + ": `expect` guards the equation at `index`; an added one has nothing to guard"); return 1; }
+					if (string.IsNullOrWhiteSpace(eop.code)) { Console.Error.WriteLine(at + ": `add` needs `code`"); return 1; }
+					int clash = list.ToList().FindIndex(x => x.Name.Value == eop.add);
+					if (clash >= 0)
+					{
+						Console.Error.WriteLine(string.Format("{0}: an equation named '{1}' already exists at index {2}; names must be unique so values can reference them", at, eop.add, clash));
+						return 1;
+					}
+					eq = new DynamicEquation();
+					eq.Name.SetValue(eop.add);
+					if (!collection.Add(eq))
+					{
+						Console.Error.WriteLine(string.Format("{0}: the project's equation list is full ({1}, the editor's limit)", at, list.Count));
+						return 1;
+					}
+					eqIndex = collection.Values.Count - 1;
+					addedEquations.Add(eqIndex);
+					before = "(new)";
+				}
+				else
+				{
+					if (!eop.index.HasValue) { Console.Error.WriteLine(at + ": needs `index` (change an equation) or `add` (create one)"); return 1; }
+					if (eop.index.Value < 0 || eop.index.Value >= list.Count)
+					{
+						Console.Error.WriteLine(string.Format("{0}: no equation at index {1} ({2} in the project)", at, eop.index.Value, list.Count));
+						return 1;
+					}
+					eqIndex = eop.index.Value;
+					eq = list[eqIndex];
+					if (eop.expect != null && eq.Name.Value != eop.expect)
+					{
+						Console.Error.WriteLine(string.Format("equation {0} is named '{1}', spec expected '{2}'", eqIndex, eq.Name.Value, eop.expect));
+						return 1;
+					}
+					if (eop.code == null) { Console.Error.WriteLine(at + ": nothing to change (give `code`)"); return 1; }
+					before = JsonSerializer.Serialize(eq.Code.Value, CodeJson);
+				}
+				eq.Code.SetValue(eop.code);
+				if (!CompileEquation(eop.code, out string compileError))
+				{
+					Console.Error.WriteLine(string.Format("{0} ('{1}'): the code does not compile: {2}", at, eq.Name.Value, compileError));
+					return 1;
+				}
+				eqWanted.RemoveAll(w => w.Item1 == eqIndex);
+				eqWanted.Add(Tuple.Create(eqIndex, eq.Name.Value, eop.code));
+				eqReport.Add(string.Format("  equation {0,-3} {1} '{2}': {3} -> {4}", eqIndex, eop.add != null ? "added" : "changed",
+					eq.Name.Value, before, JsonSerializer.Serialize(eop.code, CodeJson)));
+			}
 
 			// Procedural models first, so the node ops below can reference a
 			// model this spec creates.
@@ -764,12 +867,17 @@ namespace Niagara2Efk
 						foreach (var line in refReport.Where(l => l.StartsWith("WARNING"))) Console.Error.WriteLine("add: " + line);
 						if (wrong.Count > 0 || refReport.Any(l => l.StartsWith("WARNING")))
 						{
-							foreach (var w in wrong) Console.Error.WriteLine("add: procedural model reference at " + w + " did not carry over");
+							foreach (var w in wrong) Console.Error.WriteLine("add: project reference at " + w + " did not carry over");
 							return 1;
 						}
 						int modelsAfter = Core.ProceduralModel.ProceduralModels.Values.Count;
-						addReport.Add(string.Format("  {0,-14} carried {1} procedural model reference(s) from {2}{3}", opPath, carried.Count, Path.GetFileName(op.add.file),
-							modelsAfter > modelsBefore ? string.Format(" as new model(s) {0}..{1}", modelsBefore, modelsAfter - 1) : " (models already carried by an earlier add)"));
+						int nModels = carried.Count(r => r.Kind == "ProceduralModel"), nEqs = carried.Count - nModels;
+						if (nModels > 0)
+							addReport.Add(string.Format("  {0,-14} carried {1} procedural model reference(s) from {2}{3}", opPath, nModels, Path.GetFileName(op.add.file),
+								modelsAfter > modelsBefore ? string.Format(" as new model(s) {0}..{1}", modelsBefore, modelsAfter - 1) : " (models already carried by an earlier add)"));
+						if (nEqs > 0)
+							addReport.Add(string.Format("  {0,-14} carried {1} dynamic equation reference(s) from {2} ({3} equation(s) in the project now)", opPath, nEqs,
+								Path.GetFileName(op.add.file), Core.Dynamic.Equations.Values.Count));
 					}
 					target = copy;
 				}
@@ -796,6 +904,12 @@ namespace Niagara2Efk
 					var prior = applied.FirstOrDefault(x => x.Node == opPath && EfkCompat.NormalizePath(x.Key) == normalized);
 					if (prior != null) { prior.Wanted = kv.Value.GetRawText(); applied.Remove(prior); applied.Add(prior); }
 					else applied.Add(new Applied { Node = opPath, Key = kv.Key, Before = before, Wanted = kv.Value.GetRawText() });
+					if (leaf.Value is Effekseer.Data.Value.DynamicEquationReference && kv.Value.ValueKind != JsonValueKind.Null &&
+						!EnableEquation(target, opPath, normalized, applied, out err))
+					{
+						Console.Error.WriteLine(string.Format("node '{0}' ({1}) {2}: {3}", opPath, target.Name.Value, kv.Key, err));
+						return 1;
+					}
 				}
 				foreach (var sh in op.shift ?? new List<ShiftSpec>())
 				{
@@ -923,6 +1037,12 @@ namespace Niagara2Efk
 						a.Node, n.Name.Value, a.Key, group, mode, ParentPath(group), type);
 			}
 			var modelXml = Core.ProceduralModel.ProceduralModels.Values.Select(m => Core.Copy("ProceduralModel", m)).ToList();
+			var usedEquations = new HashSet<int>(referenced.Values.Where(v => v.StartsWith("DynamicEquation ", StringComparison.Ordinal))
+				.Select(v => int.Parse(v.Split(' ')[1], CultureInfo.InvariantCulture)));
+			foreach (int idx in addedEquations.Where(i => !usedEquations.Contains(i)))
+				Console.WriteLine("WARNING: equation {0} '{1}' was added but no value references it",
+					idx, Core.Dynamic.Equations.Values[idx].Name.Value);
+			int equationsSaved = Core.Dynamic.Equations.Values.Count;
 
 			// Added nodes are part of what the saved file must hold.
 			nodesBefore = Core.Root.Children.Internal.Sum(c => CountSubtree(c));
@@ -1016,6 +1136,22 @@ namespace Niagara2Efk
 					Console.Error.WriteLine("VERIFY FAIL: procedural model " + i + " differs from what was saved");
 					ok = false;
 				}
+			// Every equation written comes back at its index with its name and
+			// code, and still compiles (a failure exports as empty bytecode).
+			var eqsAfter = Core.Dynamic.Equations.Values;
+			if (eqsAfter.Count != equationsSaved)
+			{
+				Console.Error.WriteLine(string.Format("VERIFY FAIL: {0} dynamic equation(s) saved, {1} in the file", equationsSaved, eqsAfter.Count));
+				ok = false;
+			}
+			foreach (var w in eqWanted)
+			{
+				bool same = w.Item1 < eqsAfter.Count && eqsAfter[w.Item1].Name.Value == w.Item2 && eqsAfter[w.Item1].Code.Value == w.Item3;
+				bool compiles = same && CompileEquation(eqsAfter[w.Item1].Code.Value, out _);
+				Console.WriteLine("VERIFY {0}: equation {1} '{2}' {3}", same && compiles ? "OK" : "FAIL", w.Item1, w.Item2,
+					!same ? "name or code differs from the request" : !compiles ? "no longer compiles" : "name and code read back, compiles");
+				if (!same || !compiles) ok = false;
+			}
 			var referencedAfter = ProjectRefs(out _);
 			foreach (var r in referenced)
 				if (!referencedAfter.TryGetValue(r.Key, out var xml) || xml != r.Value)
@@ -1146,6 +1282,7 @@ namespace Niagara2Efk
 			foreach (var ksv in keySets)
 				Console.WriteLine(string.Format("  {0,-14} {1}: {2} -> {3}", ksv.Item1.Node, ksv.Item1.Key, ksv.Item1.Before, ksv.Item1.After));
 			foreach (var line in tintReport) Console.WriteLine(line);
+			foreach (var line in eqReport) Console.WriteLine(line);
 			Console.WriteLine(ok ? string.Format("VERIFY OK: {0} nodes, {1} value(s) set{3}{4} and read back from the saved file{2}{5}", nodesAfter, applied.Count,
 									tints.Count > 0 ? ", every tinted colour at its hue" : "", shifts.Count > 0 ? ", " + shifts.Count + " curve(s) shifted" : "",
 									keySets.Count > 0 ? ", " + keySets.Count + " curve(s) rewritten" : "",
@@ -1163,6 +1300,51 @@ namespace Niagara2Efk
 				Console.WriteLine("WARNING: node {0} ({1}) DepthOffset {2} >= {3}: past RPGReactor's battle-camera near plane for a particle at the effect, it may never draw",
 					far.Path, far.Name, far.DepthOffset.ToString("0.###", CultureInfo.InvariantCulture), ElementLimits.NearPlane.ToString(CultureInfo.InvariantCulture));
 			return ok ? 0 : 1;
+		}
+
+		/// <summary>
+		/// A value reads an equation only where the editor offers one
+		/// (CanSelectDynamicEquation): elsewhere Binary/*.cs writes no reference
+		/// at all, so the equation would be saved in the project and never run.
+		/// The value's IsDynamicEquationEnabled is switched on with it, as the
+		/// editor does, and read back like any other value.
+		/// </summary>
+		static bool EnableEquation(NodeBase target, string opPath, string refPath, List<Applied> applied, out string err)
+		{
+			err = null;
+			string ownerPath = ParentPath(refPath);
+			if (!TryResolve(target, ownerPath, out var owner, out err) || owner.Value == null) return false;
+			var can = owner.Value.GetType().GetField("CanSelectDynamicEquation", BindingFlags.Public | BindingFlags.Instance);
+			if (can == null || !(bool)can.GetValue(owner.Value))
+			{
+				err = ownerPath + " takes no dynamic equation in the runtime (the exporter writes no reference for it: " +
+					  "SinglePVA, SingleEasing and FCurve values have none); pick a type that has one (Fixed, PVA, Easing)";
+				return false;
+			}
+			string flag = ownerPath + "/IsDynamicEquationEnabled";
+			if (!TryResolve(target, flag, out var leaf, out err) || !TryDescribe(leaf, out var before)) return false;
+			if (!TrySet(leaf, JsonDocument.Parse("true").RootElement, out err)) return false;
+			if (!applied.Any(a => a.Node == opPath && EfkCompat.NormalizePath(a.Key) == flag))
+				applied.Add(new Applied { Node = opPath, Key = flag, Before = before, Wanted = "true" });
+			return true;
+		}
+
+		/// <summary>
+		/// Compile equation code the way Binary/Exporter.cs does. A failure there
+		/// writes a zero-length bytecode, which the runtime runs as nothing: the
+		/// value then keeps its stored number with no warning anywhere.
+		/// </summary>
+		static bool CompileEquation(string code, out string error)
+		{
+			error = null;
+			try
+			{
+				var r = new Effekseer.InternalScript.Compiler().Compile(code ?? "");
+				if (r.Error != null) { error = r.Error.Message + " (line " + r.Error.Line.ToString(CultureInfo.InvariantCulture) + ")"; return false; }
+				if (r.Bytecode == null || r.Bytecode.Length == 0) { error = "empty bytecode"; return false; }
+				return true;
+			}
+			catch (Exception e) { error = e.Message; return false; }
 		}
 
 		static bool IsRootPath(string p)
@@ -1309,6 +1491,7 @@ namespace Niagara2Efk
 				s = (leaf.Component == "Center" ? io.GetCenter() : leaf.Component == "Max" ? io.GetMax() : io.GetMin()).ToString(CultureInfo.InvariantCulture);
 				return true;
 			}
+			if (leaf.Value is Effekseer.Data.Value.DynamicEquationReference dr && dr.Value == null) { s = "(none)"; return true; }
 			return TryDescribe(leaf.Value, out s);
 		}
 
@@ -1354,6 +1537,11 @@ namespace Niagara2Efk
 				// model's own values are dumped once, under "### procedural <i>".
 				case ProceduralModelReference pr:
 					s = pr.Value == null ? "(none)" : "#" + pr.Index.ToString(CultureInfo.InvariantCulture) + " \"" + pr.Value.Name.Value + "\"";
+					return true;
+				// Likewise an equation: its code is dumped once, under "### equation <i>".
+				// An unset one prints nothing in a dump (every value has two).
+				case Effekseer.Data.Value.DynamicEquationReference dr when dr.Value != null:
+					s = "#" + dr.Index.ToString(CultureInfo.InvariantCulture) + " \"" + dr.Value.Name.Value + "\"";
 					return true;
 			}
 			var t = v.GetType();
@@ -1518,6 +1706,39 @@ namespace Niagara2Efk
 					if (pr.Index != target) { err = "the reference did not take index " + target; return false; }
 					return true;
 				}
+			}
+
+			// A dynamic equation by its index in the project's list, or by its
+			// name when exactly one equation has it; null clears the reference.
+			if (v is Effekseer.Data.Value.DynamicEquationReference dr)
+			{
+				var eqs = Core.Dynamic.Equations.Values;
+				if (j.ValueKind == JsonValueKind.Null) { dr.SetValue(null); return true; }
+				int target;
+				if (whole) target = iv;
+				else if (j.ValueKind == JsonValueKind.String)
+				{
+					string wanted = j.GetString();
+					var hits = Enumerable.Range(0, eqs.Count).Where(k => eqs[k].Name.Value == wanted).ToList();
+					if (hits.Count != 1)
+					{
+						err = hits.Count == 0
+							? string.Format("no dynamic equation named '{0}' (the project has: {1})", wanted,
+								eqs.Count == 0 ? "none" : string.Join(", ", eqs.Select((m, k) => k + " '" + m.Name.Value + "'")))
+							: string.Format("{0} dynamic equations are named '{1}' (indices {2}); reference one by index", hits.Count, wanted, string.Join(", ", hits));
+						return false;
+					}
+					target = hits[0];
+				}
+				else { err = "a dynamic equation reference takes an equation index, a unique equation name, or null"; return false; }
+				if (target < 0 || target >= eqs.Count)
+				{
+					err = string.Format("no dynamic equation at index {0} ({1} in the project)", target, eqs.Count);
+					return false;
+				}
+				dr.SetValueWithIndex(target);
+				if (dr.Index != target) { err = "the reference did not take index " + target; return false; }
+				return true;
 			}
 
 			var t = v.GetType();
@@ -1879,6 +2100,12 @@ namespace Niagara2Efk
 			{
 				if (wanted.ValueKind == JsonValueKind.String) return pr.Value != null && pr.Value.Name.Value == wanted.GetString();
 				return TryInt(wanted, out int wi) && pr.Index == wi;
+			}
+			if (leaf.Value is Effekseer.Data.Value.DynamicEquationReference der)
+			{
+				if (wanted.ValueKind == JsonValueKind.Null) return der.Value == null;
+				if (wanted.ValueKind == JsonValueKind.String) return der.Value != null && der.Value.Name.Value == wanted.GetString();
+				return TryInt(wanted, out int wi) && der.Index == wi;
 			}
 			var have = Numbers(leaf);
 			if (have == null) return true; // booleans and enums: read-back equality is the check

@@ -35,6 +35,7 @@ namespace Niagara2Efk
 					targets.Add(Tuple.Create(p, (NodeBase)n));
 				}
 			var shown = new HashSet<int>();
+			var shownEquations = new HashSet<int>();
 			foreach (var t in targets)
 			{
 				Console.WriteLine("### " + t.Item1 + " " + t.Item2.Name.Value);
@@ -43,6 +44,7 @@ namespace Niagara2Efk
 					WalkOwnValues(node, (_, v) =>
 					{
 						if (v is ProceduralModelReference r && r.Index >= 0) shown.Add(r.Index);
+						if (v is Effekseer.Data.Value.DynamicEquationReference d && d.Index >= 0) shownEquations.Add(d.Index);
 					});
 			}
 			// Procedural models live in the project, not in a node: a node's
@@ -56,8 +58,22 @@ namespace Niagara2Efk
 				Console.WriteLine("### procedural " + i.ToString(CultureInfo.InvariantCulture) + " " + models[i].Name.Value);
 				DumpObject(models[i], "", 0, new HashSet<object>(ReferenceEqualityComparer.Instance));
 			}
+			// Dynamic equations likewise: a value's DynamicEquationMin/Max (or
+			// DynamicEquation) prints "#<index> "<name>"", the code is printed
+			// here once, on one line with its line breaks as \n.
+			var equations = Core.Dynamic.Equations.Values;
+			for (int i = 0; i < equations.Count; i++)
+			{
+				if (nodePaths.Count > 0 && !shownEquations.Contains(i)) continue;
+				Console.WriteLine("### equation " + i.ToString(CultureInfo.InvariantCulture) + " " + equations[i].Name.Value);
+				Console.WriteLine("Code = " + System.Text.Json.JsonSerializer.Serialize(equations[i].Code.Value.Replace("\r\n", "\n"), CodeJson));
+			}
 			return 0;
 		}
+
+		/// <summary>Equation code as JSON, with + and quotes left readable.</summary>
+		static readonly System.Text.Json.JsonSerializerOptions CodeJson = new System.Text.Json.JsonSerializerOptions
+			{ Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
 		static NodeBase FindNode(string path)
 		{
