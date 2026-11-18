@@ -51,7 +51,7 @@ RESOURCE_EXT = ('.png', '.dds', '.tga', '.efkmodel', '.efkmat', '.efkmatd', '.ef
 def missing_inputs(spec):
     """Files the spec builds on that are not on disk: its source effect, effects it copies nodes from (add.file) and
     the resources its values name, each looked up as written, beside the spec, then from the working directory.
-    The edit tool only says it failed; a spec written by a post-step (OT2 Boost's light.py) builds on the
+    The edit tool only says it failed; a spec written by a post-step (an OT2 study effect's light.py) builds on the
     intermediate effect that step read, and a build script that deleted it left `edit ... exit 1` and nothing else."""
     try:
         d = json.loads(spec.read_text(encoding='utf-8-sig'))

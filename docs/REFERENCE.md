@@ -1916,6 +1916,15 @@ file `"overlay": true`, tags `-ovl`) forces the fallback, and every result says 
 update wrapper, bound to the overlay's context, stepped the overlay whenever the engine stepped the scene's, so no
 in-scene effect ever advanced. Every run reported "did not end", with no load time and black captures.
 
+Since 2026-11-16 a run that lands on the overlay without `--overlay` fails (`played on the overlay fallback, not in
+the scene`; results carry `overlayRequested` and `sceneLayer`, and older results without them are not judged).
+The usual cause is a project whose `js/` was replaced by an older engine build: on 2026-11-15 opening ASSEMBLER TEST
+PROJECT in a 0.98.5 editor rewrote 19 engine files with a build that has no `Sprite_Animation.SceneLayer` (its
+`reactor_sprites.js` 193 KB against the template's 326 KB). Every effect then played on the overlay with the 4000-instance
+pool, and an OT0 effect (1442/1443) never started there. Restore `js/` from the engine template
+(`Reactor Source Code Github Branch/template/Demo/js`, keeping the project's `reactor_plugins.js` and `js/plugins/`),
+or pass `--overlay` when the fallback is what you mean to measure.
+
 Capture mode (`--mode capture`, `--step N`, `--shots N`) saves what the player
 sees every Nth game frame as raw RGBA, at half resolution: from the game's canvas when effects play in the scene, from
 the Effekseer overlay canvas (which then holds the whole composited frame) on the fallback path. The game runs
@@ -1929,10 +1938,32 @@ node tools/ingame/run.js --project "../ASSEMBLER TEST PROJECT" --out out/edits/<
 node tools/ingame/compare.js --out out/edits/<task>/cap --base capture-319-0 --noise capture-319-1 capture-319
 ```
 
+**Exact HDR light (`--hdr-float`, capture mode).** The light an HDR effect draws, read as float from the overlay's
+light buffer: `reactor_hdr_overlay.js` resolves its multisampled buffer (RGBA16F) with one `blitFramebuffer` per grade
+group, and right after it `page.js` reads that buffer (before bloom, grade and composite) and sums the groups of the
+frame. Each captured frame gets `lf###.f32` beside `f###.rgba`: RGB float32, the 2x2 mean on the same 640 x 360 grid,
+rows top-down, in exposed light units; a frame with no HDR light has no file. It needs the in-scene WebGL2 path (the
+default) and its MSAA resolve: a capture that saw no resolve fails (`--hdr-float: no HDR light-buffer resolve seen`),
+and the result's `capture.hdrFloat` gives the frames, resolves and size. The frames carry the same numbers as the
+`.rgba` (checked 2026-11-16: a hook labelled by its own count matched lf<f+1> to 1e-4). Use it instead of
+`REACTOR_HDR.debugScale` frames for any light number: there is no backdrop to subtract and nothing is clipped, while
+the debugScale reading under-reads light held in sub-pixel hot spots 10-1000x (§ Measuring an OT2 skill from its
+captures). `tools/ingame/test_hdr_overlay.py` checks it (job `hdr-float`: the fixture's 4.0 red read back exactly).
+
+**A fixed random seed (`--seed N`).** Effekseer seeds each play from the page's C `rand()`, which a fresh page starts
+the same way, so every run of a build is the same random draw. `--seed N` (jobs file `"seed"`, tags `-seedN`) gives
+every play random seed N, through the handle's own `setRandomSeed` (the engine's call for an HDR effect and its
+companion then keeps N). The result records `seed {value, plays}`, and a job whose plays were not seeded fails. Use
+one run per seed to sample a build's spread (preview.py `capture --seeds`, § Measuring an OT2 skill from its captures).
+
 Swapping files without touching the project: `--map Edited/Meteors/=<dir>`
 serves a whole effects folder from elsewhere, `--sub <file name>=<file>`
 replaces one texture/model by name (knockout tests: replace a texture with a
-flat image of its average colour to see whether it matters), and
+flat image of its average colour to see whether it matters; a `--sub` of an `.efkefc` serves that file alone, and
+its materials, textures and models still load from the project folder, so preview a rebuilt effect through
+`--map` / `preview.py capture --efk`: a job fails when an effect resource it asks for is not found, naming it in
+`missingEffectFiles`, since the layer draws without it and the engine reports nothing. Spark isolates of a study effect
+whose material had a new hashed name read 0.006 of the game that way, 2026-11-18), and
 `--override /js/reactor_plugins.js=<file>` replaces any served file (for example
 to run with and without a plugin). From Git Bash, run it with `MSYS_NO_PATHCONV=1`:
 MSYS rewrites an argument that starts with `/` into a Windows path, so the override
@@ -2082,7 +2113,7 @@ counts a few frames past the last drawn pixel, f288 there) and reinstall with `-
 Before building, it checks that every file the spec names is on disk (its `source` effect, `add.file` sources, and
 the textures, models and materials in its values) and refuses with the list (exit 2) when one is missing. The edit
 tool itself only reports `exit 1`. Two ways to get there (2026-10-10): a spec written by a post-step builds on the
-effect that step read (OT2 Boost's `boost_light.py` on `Lv<n>-flash.efkefc`, which the build script deleted), and a
+effect that step read (an OT2 study effect's `boost_light.py` on `Lv<n>-flash.efkefc`, which the build script deleted), and a
 `build_effekseer.py` spec names the bakes in its work folder's `tex/` and `mesh/`, not the copies in `build/`: those
 folders are inputs of the spec, not leftovers, and recycling them leaves the built effect playable but no longer
 installable from its spec.
@@ -2209,6 +2240,24 @@ therefore followed by `pow(tmOut, 2.2)` before the backdrop is solved (`--ot2por
 brighter and hazier than the game). The graded twins and the ordinary OT2 builds still compute the stored image in
 their materials. The build prints an `HDR SIDECAR:` line with the setting used. On identical light the overlay gives 1.04-1.17x the game's bloom
 energy (`out/edits/ot2-game-bloom-20261025/NOTES.md`).
+
+**The game's vignette** (since 2026-11-16). OT2's tonemap pass multiplies all light by UE's vignette after bloom:
+`lin = EA x (1 / preExposure) x (scene + bloom x scale) x vignette`, vignette `1 / (1 + |1.44 x 1.2329 x (x, 0.5625 y)|^2)^2`
+over NDC (cb0[62].x 1.44 in every OT2 battle capture read so far: 0.31 at half the screen width, 0.04 in the corners).
+Skills play over the party on the right, so the game shows them at a fraction of their light: one study skill 0.27-0.56,
+light-weighted per capture. The overlay has no vignette, so a build whose light matches the captures was shown at
+2-3x the game's light. Tested on the game's own frame (one study capture, replayed:
+`out/edits/ot2-mipbias-scan-20261115/REPORT.md`, "The post, tested on the game's own frame"):
+- that formula rebuilds the pass output within 0.79/255;
+- the overlay's bloom on the game's light is 1.04x the game's bloom texture;
+- the sidecar's grade equals the capture's CombineLUTs exactly;
+- our composite on the game's own scene and effect is 1.7-1.9x the game's effect gain without the vignette, 0.94-0.99x
+  with it.
+
+`--ot2port-hdr-vignette V` (0 < V <= 1, default 1) puts it in the sidecar's grade, `(hdr * V + bk)`. That scales the
+effect's light and its bloom, as the game blooms before its vignette; the backdrop is not scaled. `ot2measure.py game`
+measures V (below). Light ratios against the captures (`ot2measure.py ours`) stay before the vignette, so their target
+is still 1.0. The graded twin has no vignette yet.
 The default fallback is the build name without `-hdr`, or `<name>-ldr` when no suffix was present; edit the sidecar
 when naming the installed pair differently. `effectjob` accepts `"hdr": true` at manifest, system, or build level for
 `"builder": "cascade-port"`; the checker verifies the sidecar and absence of per-material grades. Combining requires
@@ -3153,7 +3202,7 @@ Digest version 2 adds, each on by default and recorded in `options`:
 - **`--buffer-cap MB`** (default 64): larger buffer SRVs are hashed only.
 - **`--dedup`** (off): after digesting, a per-capture file whose bytes equal a blob or another
   file (e.g. `rt/<target>_after.exr` = the `blobs/dynamic` snapshot the next pass reads)
-  becomes an NTFS hard link to it: 336 MB of the OT2 Boost store. Writers replace files
+  becomes an NTFS hard link to it: 336 MB of one OT2 study capture store. Writers replace files
   rather than write in place, so a link is never written through.
 - **`--compress`** (off, Windows): after digesting, `compact /exe:lzx` on every file of
   the store. Lossless and transparent: every reader opens the files as before.
