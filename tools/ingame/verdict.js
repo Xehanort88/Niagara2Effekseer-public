@@ -14,6 +14,12 @@ function verdict(r) {
   if (r.pageError) failures.push('page error: ' + String(r.pageError).split('\n')[0].slice(0, 200));
   if (r.engineErrors && r.engineErrors.length) failures.push(`${r.engineErrors.length} engine error(s)`);
   if (r.errors && r.errors.length) failures.push('load errors: ' + r.errors.join(', '));
+  // a material, texture or model the effect names that the server did not have: the layer drew without it, and the
+  // engine reports no error. --sub serves only the named file; its resources load from the project folder, so a build
+  // whose material code changed (a new hashed name) drew its layers flat (spark isolates of a study effect read 0.006 of
+  // the game, 2026-11-18). Preview a build folder with --map (preview.py capture --efk) instead.
+  if (r.missingEffectFiles && r.missingEffectFiles.length)
+    failures.push(`effect resources not found (${r.missingEffectFiles.length}): ${r.missingEffectFiles.slice(0, 4).join(', ')}${r.missingEffectFiles.length > 4 ? ', ...' : ''} (--sub serves only the named file and loads its materials, textures and models from the project folder: serve the build's folder with --map, e.g. preview.py capture --efk)`);
   const measured = !r.timeout && !r.pageError && !r.runnerError;
   if (measured && !r.cold && !r.capture) failures.push('result has neither time nor capture data');
   for (const k of ['cold', 'warm']) {

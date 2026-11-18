@@ -78,6 +78,13 @@ test('page_reads_actual_idle_pool', () => {
 });
 test('verdict_ok_time', () => assert.deepStrictEqual(verdict(okTime()), { status: 'ok', failures: [], warnings: [] }));
 test('verdict_ok_capture', () => assert.strictEqual(verdict(okCap()).status, 'ok'));
+test('verdict_missing_resource_fails', () => {
+  // a --sub effect whose material is not in the project folder drew without it (2026-11-18)
+  const r = { ...okCap(), missingEffectFiles: ['/effects/Edited/OT2/X/Materials/ot2o_Spark_a4c84be5.efkmat'] };
+  assert.strictEqual(verdict(r).status, 'fail');
+  assert.match(verdict(r).failures.join(), /effect resources not found \(1\): .*a4c84be5\.efkmat .*--map/);
+  assert.strictEqual(verdict({ ...okCap(), missingEffectFiles: [] }).status, 'ok');
+});
 test('verdict_timeout_fails', () => assert.strictEqual(verdict({ timeout: true }).status, 'fail'));
 test('verdict_page_error_fails', () => assert.match(verdict({ pageError: 'Error: boom\n at x' }).failures[0], /page error: Error: boom$/));
 test('verdict_engine_error_fails', () => assert.strictEqual(verdict({ ...okTime(), engineErrors: ['LoadError'] }).status, 'fail'));

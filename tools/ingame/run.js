@@ -138,6 +138,9 @@ fs.mkdirSync(OUT, { recursive: true });
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.wasm': 'application/wasm', '.css': 'text/css', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf' };
 let job = null, pending = null;
 const served = [];
+// effect resources the page asked for and the server did not have (verdict fails the job: a layer drew without them)
+const missing = [];
+const RESOURCE = /\.(efkefc|efkmat|efkmodel|png|jpe?g|dds|tga)$/i;
 
 function resolveFile(u) {
   if (job.override && job.override[u]) return job.override[u];
@@ -172,7 +175,7 @@ const server = http.createServer((req, res) => {
   const f = resolveFile(u);
   if (!f) { res.writeHead(403); return res.end(); }
   fs.readFile(f, (err, data) => {
-    if (err) { res.writeHead(404); return res.end(); }
+    if (err) { if (u.startsWith('/effects/') && RESOURCE.test(u)) missing.push(u); res.writeHead(404); return res.end(); }
     if (u.startsWith('/effects/')) served.push(u);
     if (u === '/' || u === '/index.html') data = Buffer.from(data.toString().replace('</body>', '<script src="/__ingame.js"></script></body>'));
     res.writeHead(200, { 'Content-Type': MIME[path.extname(f).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-store' });
@@ -181,7 +184,7 @@ const server = http.createServer((req, res) => {
 });
 
 async function runOne(j) {
-  job = j; served.length = 0;
+  job = j; served.length = 0; missing.length = 0;
   let cleared = 0;
   const capDir = path.join(OUT, j.tag);
   if (j.mode === 'capture' && fs.existsSync(capDir)) {
@@ -199,7 +202,7 @@ async function runOne(j) {
   clearTimeout(timer); pending = null;
   await new Promise((r) => { chrome.once('exit', r); try { chrome.kill(); } catch (e) { r(); } setTimeout(r, 5000); });
   try { fs.rmSync(profile, { recursive: true, force: true }); } catch (e) {}
-  return { tag: j.tag, ...result, ...(opts.headed ? {headed: true} : {}), servedEffectFiles: served.slice(), ...(cleared ? { clearedStaleFrames: cleared } : {}) };
+  return { tag: j.tag, ...result, ...(opts.headed ? {headed: true} : {}), servedEffectFiles: served.slice(), missingEffectFiles: [...new Set(missing)], ...(cleared ? { clearedStaleFrames: cleared } : {}) };
 }
 
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `port ${port} is busy: pick another with --port` : e); process.exit(2); });
