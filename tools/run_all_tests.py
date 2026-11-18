@@ -285,6 +285,13 @@ def run_suite(suite, args, work, logs):
 
 
 def main():
+    # a suite's summary line may hold characters the console cannot encode (a Windows cp1252 console and a log read with
+    # errors='replace': U+FFFD); print them replaced instead of stopping the run (2026-11-17, after cascade-cascade)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='replace')
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--work', type=Path, default=ROOT / 'out/tests/all', help='default out/tests/all')
     ap.add_argument('--only', help='comma-separated parts of suite names, e.g. cascade,edit')

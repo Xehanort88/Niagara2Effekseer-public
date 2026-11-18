@@ -269,6 +269,15 @@ def main():
         json.dump(view_manifest(t, rot), open(os.path.join(cs, 'captures', cid, 'manifest.json'), 'w'))
     check('view buffer: kept draw, by rotation', rdcdigest.view_buffer(view_manifest(1.0))[0] == 9)
     check('view buffer: none without a rotation', rdcdigest.view_buffer(view_manifest(1.0, False)) == (None, None))
+    # a short buffer with a rotation at byte 192 binds before the View in OT2 captures (one study capture): skipped
+    short = bytearray(256)
+    struct.pack_into('<16f', short, 192, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1)
+    vm = view_manifest(7.5)
+    vm['tables']['cbdata']['s'] = short.hex()
+    vm['draws'].insert(0, {'eid': 3, 'keep': True, 'shaders': {'vs': {'cbuffers': [{'data': 's'}]}}})
+    eid_, raw_ = rdcdigest.view_buffer(vm)
+    check('view buffer: a 256-byte rotation buffer before the View is skipped',
+          eid_ == 9 and struct.unpack_from('<f', raw_, 2136)[0] == 7.5)
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         rdcdigest.clock(argparse.Namespace(store=cs, capture=None, offset=2136, cast_gap=3.0, find=False, json=True))

@@ -29,9 +29,25 @@ function verdict(r) {
   // --preload-id asked for the covered cast; a cold play that still loaded the
   // effect measured the uncovered one (plugin disabled, preload failed or not done).
   if (r.preloadId && r.cold && measured && !r.cold.loadedBefore) failures.push('cold play: --preload-id, but the effect was not loaded before the cast (preload plugin disabled, failed or still loading)');
+  // Since runtime 20261027.3 the game draws animations in PIXI's scene; the overlay is only its fallback. A run that
+  // lands there without --overlay measured the wrong engine (results before 2026-11-16 carry no overlayRequested).
+  if (r.overlayRequested === false && r.effekseerPath === 'overlay') {
+    failures.push(r.sceneLayer === false
+      ? "played on the overlay fallback, not in the scene: the project's engine has no Sprite_Animation.SceneLayer (js/ replaced by an older engine build, e.g. by opening the project in an older editor); restore js/ from the engine template, or pass --overlay if the overlay is intended"
+      : 'played on the overlay fallback, not in the scene, although the engine has an in-scene layer (Sprite_Animation.SceneLayer inactive); pass --overlay if the overlay is intended');
+  }
+  // --seed: a run whose plays were not seeded sampled the default draw, not the seed it is labelled with
+  if (r.seedRequested !== undefined && r.seedRequested !== null && measured && !(r.seed && r.seed.plays > 0 && r.seed.value === r.seedRequested))
+    failures.push(`--seed ${r.seedRequested}: no Effekseer play was seeded (context.play not reached through Graphics.effekseer's prototype)`);
   if (r.capture) {
     if (!(r.capture.frames >= 0)) failures.push('capture: animation never started (no frame captured)');
     else if (!r.capture.ended) failures.push(`capture: animation did not end within ${r.capture.captureSeconds || 120} s (--capture-seconds; capture is incomplete)`);
+  }
+  // --hdr-float reads the light buffer at the overlay's MSAA resolve: a capture that saw none measured nothing
+  if (r.hdrFloatRequested && r.capture && measured) {
+    const h = r.capture.hdrFloat;
+    if (!h || !(h.blits > 0)) failures.push('--hdr-float: no HDR light-buffer resolve seen (not an HDR effect, its sidecar not served, the overlay path, or a context without multisampled float targets)');
+    else if (h.sizeChanged) failures.push('--hdr-float: the light buffer changed size during the capture');
   }
   if (r.preload && r.preload.timedOut) warnings.push('preload plugin timed out');
   for (const k of ['cold', 'warm', 'capture']) {

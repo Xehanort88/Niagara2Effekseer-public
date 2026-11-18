@@ -13,6 +13,7 @@
   const post = (obj) => fetch('/__result', { method: 'POST', body: JSON.stringify(obj) });
   window.addEventListener('error', (e) => post({ pageError: String(e.message) }));
   const job = await (await fetch('/__job.json')).json();
+  let SEED = null;           // run.js --seed: { value, plays } once the plays are seeded
   const ID = job.id;
   // How long an animation may play, from its first frame, before it counts as
   // not ending (run.js --max-frames / --capture-seconds). Loading has its own
@@ -43,6 +44,23 @@
       .observe({ type: 'longtask', buffered: true });
   } catch (e) {}
 
+  // Every play of this context's class gets random seed `value`: set on the new handle, and kept when the engine sets
+  // its own (an HDR effect and its companion). Returns the record { value, plays } it counts the plays in.
+  function seedPlays(context, value) {
+    const rec = { value: value | 0, plays: 0 };
+    const proto = Object.getPrototypeOf(context), play0 = proto.play;
+    proto.play = function () {
+      const h = play0.apply(this, arguments);
+      if (h && h.setRandomSeed) {
+        const set0 = h.setRandomSeed;
+        set0.call(h, rec.value);
+        h.setRandomSeed = function () { return set0.call(this, rec.value); };
+        rec.plays++;
+      }
+      return h;
+    };
+    return rec;
+  }
   function hookEngine() {
     SceneManager.isGameActive = () => true;
     const ce = SceneManager.catchException;
@@ -224,6 +242,58 @@
     const h2 = half.getContext('2d', { willReadFrequently: true });
     let startGf = null, done = false, lastF = -1;
     const sends = [];
+    // run.js --hdr-float: the HDR overlay's light buffer itself, exactly. reactor_hdr_overlay.js post() resolves its
+    // multisampled light buffer into H.main (RGBA16F) with one blitFramebuffer per grade group; right after each such
+    // blit (a float draw framebuffer) the buffer holds the light Effekseer drew, before bloom, grade and composite, so
+    // it is read as float32 and summed over the frame's groups. Stored per captured frame as lf###.f32: the 2x2 MEAN
+    // (same pixel grid and units as the halved f###.rgba, rows top-down), RGB float32. A frame with no resolve has no
+    // file (no HDR light). Unlike REACTOR_HDR debugScale frames this needs no backdrop and loses no sub-pixel hot spot:
+    // the debugScale reading took a hot pixel averaged with dark neighbours as unclipped at a small K and read it
+    // 100-1000x under (an OT2 glow layer, 2026-11-16). The light buffer of a frame is read in the render's task
+    // and labelled with that frame's number, as f###.rgba is (frames the 2026-11-16 check matched one to one).
+    const LF = job.hdrFloat ? { gf: null, acc: null, blits: 0, nonFloat: 0, frames: 0, size: null, px: null } : null;
+    let unhook = null;
+    const flushLF = () => {
+      if (!LF || LF.acc === null || LF.gf === null || startGf === null) { if (LF) LF.acc = null; return; }
+      const f = LF.gf - startGf;
+      if (f >= 0 && f % step === 0) {
+        sends.push(fetch('/__lframe', { method: 'POST', headers: { 'x-frame': String(f) }, body: LF.acc }));
+        LF.frames++;
+      }
+      LF.acc = null;
+    };
+    if (LF) {
+      const proto = WebGL2RenderingContext.prototype, orig = proto.blitFramebuffer;
+      unhook = () => { proto.blitFramebuffer = orig; };
+      proto.blitFramebuffer = function (sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter) {
+        orig.apply(this, arguments);
+        if (done || !(mask & this.COLOR_BUFFER_BIT)) return;
+        const g = this, gf = Graphics.frameCount;
+        if (startGf !== null && (gf - startGf) % step !== 0) return;
+        const drawFb = g.getParameter(g.DRAW_FRAMEBUFFER_BINDING);
+        if (!drawFb || g.getFramebufferAttachmentParameter(g.DRAW_FRAMEBUFFER, g.COLOR_ATTACHMENT0, g.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) !== g.FLOAT) { LF.nonFloat++; return; }
+        if (LF.gf !== gf) { flushLF(); LF.gf = gf; }
+        const w = Math.abs(dx1 - dx0), h = Math.abs(dy1 - dy0), w2 = w >> 1, h2 = h >> 1;
+        if (!LF.px || LF.px.length !== w * h * 4) LF.px = new Float32Array(w * h * 4);
+        const readFb = g.getParameter(g.READ_FRAMEBUFFER_BINDING), pack = g.getParameter(g.PIXEL_PACK_BUFFER_BINDING);
+        g.bindBuffer(g.PIXEL_PACK_BUFFER, null);
+        g.bindFramebuffer(g.READ_FRAMEBUFFER, drawFb);
+        g.readPixels(Math.min(dx0, dx1), Math.min(dy0, dy1), w, h, g.RGBA, g.FLOAT, LF.px);
+        g.bindFramebuffer(g.READ_FRAMEBUFFER, readFb);
+        g.bindBuffer(g.PIXEL_PACK_BUFFER, pack);
+        if (!LF.acc) { LF.acc = new Float32Array(w2 * h2 * 3); LF.size = [w2, h2]; }
+        if (LF.acc.length !== w2 * h2 * 3) { LF.sizeChanged = true; return; }
+        const px = LF.px, acc = LF.acc;
+        for (let y = 0; y < h2; y++) {
+          const r0 = 2 * y * w * 4, r1 = r0 + w * 4, o = (h2 - 1 - y) * w2 * 3;     // GL rows are bottom-up
+          for (let x = 0; x < w2; x++) {
+            const i = r0 + 8 * x, j = r1 + 8 * x, k = o + 3 * x;
+            for (let c = 0; c < 3; c++) acc[k + c] += 0.25 * (px[i + c] + px[i + 4 + c] + px[j + c] + px[j + 4 + c]);
+          }
+        }
+        LF.blits++;
+      };
+    }
     const ra = Sprite_Animation.renderActive;
     Sprite_Animation.renderActive = function (renderer) {
       ra.call(this, renderer);
@@ -231,6 +301,8 @@
       const sp = (ss._animationSprites || []).find((s) => s._animation === anim);
       if (startGf === null && sp && sp._started) startGf = Graphics.frameCount;
       if (startGf === null) return;
+      // the light of an earlier game frame is complete once a later frame renders
+      if (LF && LF.gf !== null && LF.gf !== Graphics.frameCount) { flushLF(); LF.gf = null; }
       const f = Graphics.frameCount - startGf;
       if (f !== lastF && f % step === 0) {
         lastF = f;
@@ -261,9 +333,12 @@
     };
     $gameTemp.requestAnimation($gameTroop.aliveMembers(), id);
     for (let i = 0; i < CAPTURE_S * 20 && !done; i++) await sleep(50);
+    if (LF) { await sleep(100); flushLF(); unhook(); }
     await Promise.all(sends);
     return { frames: lastF, ended: done, size: [W >> 1, H >> 1], step, captureSeconds: CAPTURE_S,
-      peakLiveInstances: P.peakLive, instanceCapacity: P.instanceCapacity, displayType: anim.displayType };
+      peakLiveInstances: P.peakLive, instanceCapacity: P.instanceCapacity, displayType: anim.displayType,
+      ...(LF ? { hdrFloat: { frames: LF.frames, blits: LF.blits, nonFloatBlits: LF.nonFloat, size: LF.size,
+        sizeChanged: !!LF.sizeChanged, layout: 'lf###.f32: RGB float32, 2x2 mean of the light buffer, rows top-down' } } : {}) };
   }
 
   try {
@@ -301,6 +376,11 @@
     // run.js --overlay: the engine's overlay canvas instead of PIXI's scene (its fallback path).
     if (job.overlay) Graphics.effekseerInScene = false;
     if (job.prepare) (0, eval)(job.prepare);
+    // run.js --seed N: every Effekseer play gets random seed N, through the handle's own setRandomSeed (the call the
+    // engine makes for an HDR effect and its companion, which then keep N as well). A fresh page always draws the same
+    // seed, so without it every capture of a build is the same one random draw; one capture per seed samples the
+    // build's spread (README § Measuring an OT2 skill: a capture is one random draw).
+    if (job.seed !== undefined && job.seed !== null) SEED = seedPlays(Graphics.effekseer, job.seed);
     BattleManager.setup(job.troop || 1, true, false);
     const tGoto = performance.now();
     SceneManager.goto(Scene_Battle);
@@ -318,20 +398,23 @@
       warmup = await probe(warmupId, { maxFrames: 3000 }); await sleep(500);
     }
     const backdrop = await grabSceneMean();
-    const common = { id: ID, preloadId: !!job.preloadId, effekseerPath: inScene() ? 'scene' : 'overlay', renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
+    // overlayRequested + sceneLayer let verdict.js fail a run that fell back to the overlay unasked (an engine
+    // without Sprite_Animation.SceneLayer, e.g. js/ rewritten by an older editor: an OT0 effect never started there).
+    const common = { id: ID, preloadId: !!job.preloadId, hdrFloatRequested: !!job.hdrFloat, effekseerPath: inScene() ? 'scene' : 'overlay',
+      overlayRequested: !!job.overlay, seedRequested: job.seed === undefined ? null : job.seed, sceneLayer: !!sceneLayer(), renderer: glr, battleStartMs, preload: preloadRecord, warmupLoadMs: warmup && warmup.loadMs, sceneMean: backdrop };
     if (job.mode === 'capture') {
       // Loaded before the capture starts, on the path the animation will play on.
       if (inScene()) sceneLayer().load(anim.effectName); else EffectManager.load(anim.effectName);
       for (let i = 0; i < 1200 && !(cacheEntry(anim.effectName) && cacheEntry(anim.effectName).isLoaded); i++) await sleep(50);
       const cap = await capture(ID, job.step || 1, job.shots || 0);
-      postWithConsole({ ...common, capture: cap, errors: EffectManager._errorUrls.slice(), engineErrors: P.engineErrors });
+      postWithConsole({ ...common, seed: SEED, capture: cap, errors: EffectManager._errorUrls.slice(), engineErrors: P.engineErrors });
       return;
     }
     const idleBase = await idle();
     const cold = await probe(ID);
     await sleep(500);
     const warm = await probe(ID, { finish: true });
-    postWithConsole({ ...common, idle: idleBase, cold, warm, errors: EffectManager._errorUrls.slice(), engineErrors: P.engineErrors });
+    postWithConsole({ ...common, seed: SEED, idle: idleBase, cold, warm, errors: EffectManager._errorUrls.slice(), engineErrors: P.engineErrors });
   } catch (e) {
     postWithConsole({ id: ID, pageError: String((e && e.stack) || e), engineErrors: P.engineErrors });
   }

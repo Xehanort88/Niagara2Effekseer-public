@@ -985,9 +985,11 @@ def exposure(args):
                 d['id'], d['name'], d['format'], d['texel'], d['first_eid'], d['written_at']))
 
 
-def view_buffer(m):
-    """(eid, bytes) of the first kept draw's UE View uniform buffer: the constant buffer whose 3x3 at byte 192
-    (ViewToTranslatedWorld) is a rotation. (None, None) when no kept draw binds one."""
+def view_buffer(m, min_len=1024):
+    """(eid, bytes) of the first kept draw's UE View uniform buffer: the constant buffer of at least min_len bytes whose
+    3x3 at byte 192 (ViewToTranslatedWorld) is a rotation. (None, None) when no kept draw binds one.
+    min_len: the View buffer is kilobytes long; a 256-byte buffer with a rotation at byte 192 also binds in OT2 captures
+    (four captures of one skill and one of another: eids 1712 / 960) and was taken before 2026-11-17, losing their clock and camera."""
     data = m['tables']['cbdata']
     for r in m['draws']:
         if not r.get('keep'):
@@ -997,7 +999,7 @@ def view_buffer(m):
                 if not cb.get('data'):
                     continue
                 raw = bytes.fromhex(data[cb['data']])
-                if len(raw) < 256:
+                if len(raw) < max(256, min_len):
                     continue
                 f = struct.unpack_from('<16f', raw, 192)
                 R = [f[0:3], f[4:7], f[8:11]]

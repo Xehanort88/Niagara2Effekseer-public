@@ -30,6 +30,16 @@
 //                          use) and the freeze is an uncovered cast. Tags get
 //                          -pre. The job fails if the plugin is missing or the
 //                          effect was not loaded before the cold play.
+//   --hdr-float            (no value) capture mode: also read the HDR overlay's light buffer, exactly, at each
+//                          captured frame (lf###.f32: RGB float32, the 2x2 mean on the f###.rgba grid, rows top-down;
+//                          no file where the frame had no HDR light). The light Effekseer drew, before bloom, grade
+//                          and composite, with no backdrop: what REACTOR_HDR debugScale frames only approximate (they
+//                          under-read sub-pixel hot spots 100-1000x). Needs the in-scene WebGL2 path with its MSAA
+//                          resolve; a capture that saw none fails. Tools: tools/cascade/ot2measure.py ours.
+//   --seed N               give every Effekseer play random seed N (the handle's setRandomSeed, also over the
+//                          engine's own call for HDR companions). A fresh page draws the same seed each time, so
+//                          without it every capture of a build is the same random draw. Tags get -seedN; the
+//                          result records seed {value, plays}, and a job whose plays were not seeded fails.
 //   --overlay              (no value) play on the engine's overlay canvas
 //                          (Graphics.effekseerInScene = false) instead of inside
 //                          PIXI's scene. Since runtime 20261027.3 the game draws
@@ -51,10 +61,10 @@
 //                          240, 260 for a default time-mode job
 //
 // Jobs file: [{ "tag": "...", "id": 317, "mode": "time", "map": {}, "sub": {},
-//              "override": {}, "prepare": "...", "preloadId": false, "overlay": false, "warmup": 1, "troop": 1, "step": 1, "shots": 0,
+//              "override": {}, "prepare": "...", "preloadId": false, "overlay": false, "hdrFloat": false, "seed": 11, "warmup": 1, "troop": 1, "step": 1, "shots": 0,
 //              "maxFrames": 3000, "captureSeconds": 120, "timeout": 240 }]
 // Output: <out>/results.jsonl (one line per job) and <out>/<tag>/ for captures.
-// A capture job first deletes the frame files (f###.rgba, shot-f###.jpg) an
+// A capture job first deletes the frame files (f###.rgba, lf###.f32, shot-f###.jpg) an
 // earlier run with the same tag left in <out>/<tag>/, so a shorter rerun cannot
 // leave stale frames behind; the result records how many (clearedStaleFrames).
 // Each results line carries status ok|warn|fail with its failures and warnings
@@ -68,7 +78,7 @@ const { verdict } = require('./verdict');
 
 const argv = process.argv.slice(2);
 const opts = { multi: { map: [], sub: [], override: [] } };
-const FLAGS = ['preload-id', 'headed', 'overlay'];
+const FLAGS = ['preload-id', 'headed', 'overlay', 'hdr-float'];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (!a.startsWith('--')) throw new Error('unexpected argument ' + a);
@@ -98,11 +108,13 @@ const pairs = (list) => Object.fromEntries(list.map((s) => { const i = s.indexOf
 const cliShared = {
   mode: opts.mode || 'time', step: opts.step ? +opts.step : undefined, shots: opts.shots ? +opts.shots : undefined,
   warmup: opts.warmup !== undefined ? +opts.warmup : undefined, troop: opts.troop ? +opts.troop : undefined,
-  prepare: opts.prepare, preloadId: !!opts['preload-id'], overlay: !!opts.overlay, map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
+  seed: opts.seed !== undefined ? +opts.seed : undefined,
+  prepare: opts.prepare, preloadId: !!opts['preload-id'], overlay: !!opts.overlay, hdrFloat: !!opts['hdr-float'], map: pairs(opts.multi.map), sub: pairs(opts.multi.sub), override: pairs(opts.multi.override),
   maxFrames: opts['max-frames'] ? +opts['max-frames'] : undefined,
   captureSeconds: opts['capture-seconds'] ? +opts['capture-seconds'] : undefined,
   timeout: opts.timeout ? +opts.timeout : undefined,
 };
+if (cliShared.seed !== undefined && !Number.isInteger(cliShared.seed)) { console.error('--seed must be an integer'); process.exit(2); }
 for (const k of ['maxFrames', 'captureSeconds', 'timeout']) {
   if (cliShared[k] !== undefined && !(cliShared[k] > 0)) { console.error(`--${k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())} must be a positive number`); process.exit(2); }
 }
@@ -112,7 +124,7 @@ else {
   const ids = need('ids').split(',').map(Number);
   const repeat = +(opts.repeat || 1);
   jobs = [];
-  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (cliShared.preloadId ? '-pre' : '') + (cliShared.overlay ? '-ovl' : '') + (repeat > 1 ? `-${k}` : ''), id });
+  for (let k = 0; k < repeat; k++) for (const id of ids) jobs.push({ tag: `${cliShared.mode}-${id}` + (cliShared.preloadId ? '-pre' : '') + (cliShared.overlay ? '-ovl' : '') + (cliShared.seed !== undefined ? `-seed${cliShared.seed}` : '') + (repeat > 1 ? `-${k}` : ''), id });
   jobs = jobs.map((j) => ({ ...cliShared, ...j }));
 }
 jobs.forEach((j, n) => { if (!j.tag) j.tag = `job${n}-${j.id}`; if (!j.mode) j.mode = 'time'; });
@@ -120,7 +132,7 @@ jobs.forEach((j, n) => { if (!j.tag) j.tag = `job${n}-${j.id}`; if (!j.mode) j.m
 // Time mode: two plays, each up to 3000 game frames of loading plus --max-frames
 // of play at 60 fps; capture: 60 s of loading plus --capture-seconds; plus start-up.
 const jobTimeout = (j) => j.timeout || Math.max(240, Math.ceil(j.mode === 'capture' ? (j.captureSeconds || 120) + 150 : 2 * (3000 + (j.maxFrames || 3000)) / 60 + 60));
-const FRAME_FILE = /^(f\d+\.rgba|shot-f\d+\.jpg)$/;
+const FRAME_FILE = /^(f\d+\.rgba|lf\d+\.f32|shot-f\d+\.jpg)$/;
 fs.mkdirSync(OUT, { recursive: true });
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.wasm': 'application/wasm', '.css': 'text/css', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf' };
@@ -149,6 +161,7 @@ const server = http.createServer((req, res) => {
       const dir = path.join(OUT, job.tag);
       const frame = String(req.headers['x-frame'] || '').padStart(3, '0');
       if (u === '/__frame') { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'f' + frame + '.rgba'), body); }
+      else if (u === '/__lframe') { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'lf' + frame + '.f32'), body); }
       else if (u === '/__shot') { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'shot-f' + frame + '.jpg'), Buffer.from(body.toString().split(',')[1], 'base64')); }
       else if (u === '/__result' && pending) pending(JSON.parse(body.toString()));
     });

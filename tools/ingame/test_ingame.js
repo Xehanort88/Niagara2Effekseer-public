@@ -101,6 +101,19 @@ test('verdict_load_pending_fails', () => {
   assert.match(verdict(r).failures.join(), /more than 1024 rendering nodes.*lint --strict/);
 });
 test('verdict_preload_timeout_warns', () => { const v = verdict({ ...okTime(), preload: { timedOut: true } }); assert.strictEqual(v.status, 'warn'); assert.deepStrictEqual(v.failures, []); });
+test('verdict_hdr_float_needs_a_resolve', () => {
+  // run.js --hdr-float reads the light buffer at the overlay's MSAA resolve: none seen means nothing was measured
+  const r = { ...okCap(), hdrFloatRequested: true };
+  assert.match(verdict(r).failures.join(), /--hdr-float: no HDR light-buffer resolve seen/);
+  r.capture.hdrFloat = { frames: 0, blits: 0, size: null };
+  assert.match(verdict(r).failures.join(), /no HDR light-buffer resolve seen/);
+  r.capture.hdrFloat = { frames: 2, blits: 2, size: [640, 360], sizeChanged: true };
+  assert.match(verdict(r).failures.join(), /changed size/);
+  r.capture.hdrFloat.sizeChanged = false;
+  assert.strictEqual(verdict(r).status, 'ok');
+  // not asked for: no rule
+  assert.strictEqual(verdict(okCap()).status, 'ok');
+});
 test('verdict_preload_id_needs_loaded_cold_play', () => {
   const r = { ...okTime(), preloadId: true };
   assert.match(verdict(r).failures.join(), /cold play: --preload-id, but the effect was not loaded before the cast/);
@@ -109,7 +122,39 @@ test('verdict_preload_id_needs_loaded_cold_play', () => {
   // Without --preload-id an uncovered cast is the normal case, not a failure.
   assert.strictEqual(verdict(okTime()).status, 'ok');
 });
-test('verdict_console_error_warns', () => assert.strictEqual(verdict({ ...okTime(), console: { 'error: x': 2, 'warn: y': 1 } }).status, 'warn'));
+test('verdict_overlay_without_scene_layer_fails', () => {
+  const v = verdict({ ...okCap(), effekseerPath: 'overlay', overlayRequested: false, sceneLayer: false });
+  assert.strictEqual(v.status, 'fail'); assert.match(v.failures.join(), /no Sprite_Animation\.SceneLayer.*restore js\//);
+});
+test('verdict_overlay_with_inactive_scene_layer_fails', () => {
+  const v = verdict({ ...okTime(), effekseerPath: 'overlay', overlayRequested: false, sceneLayer: true });
+  assert.strictEqual(v.status, 'fail'); assert.match(v.failures.join(), /SceneLayer inactive/);
+});
+test('seed_plays_sets_and_keeps_the_seed', () => {
+  // run.js --seed: page.js seedPlays gives every play the seed, and keeps it over the engine's own call (HDR companions)
+  const src = fs.readFileSync(path.join(__dirname, 'page.js'), 'utf8');
+  const fn = src.slice(src.indexOf('  function seedPlays('), src.indexOf('  function hookEngine()'));
+  const seen = [];
+  class Handle { setRandomSeed(s) { seen.push(s); } }
+  class Context { play() { return new Handle(); } }
+  const ctx = new Context(), other = new Context();
+  const rec = require('vm').runInNewContext(fn + '; seedPlays(ctx, 23);', { ctx });
+  const h = ctx.play();
+  h.setRandomSeed(12345);                         // the engine's companion seed: kept at 23
+  other.play();                                   // a second context of the class (in-scene layer): seeded too
+  assert.deepStrictEqual(seen, [23, 23, 23]);
+  assert.deepStrictEqual({ ...rec }, { value: 23, plays: 2 });
+});
+test('verdict_seed_not_applied_fails', () => {
+  assert.strictEqual(verdict({ ...okCap(), seedRequested: 11, seed: { value: 11, plays: 2 } }).status, 'ok');
+  assert.match(verdict({ ...okCap(), seedRequested: 11, seed: { value: 11, plays: 0 } }).failures.join(), /--seed 11: no Effekseer play was seeded/);
+  assert.match(verdict({ ...okCap(), seedRequested: 11, seed: null }).failures.join(), /--seed 11/);
+  assert.strictEqual(verdict({ ...okCap(), seedRequested: null, seed: null }).status, 'ok');
+});
+test('verdict_overlay_asked_for_passes', () => assert.strictEqual(verdict({ ...okCap(), effekseerPath: 'overlay', overlayRequested: true, sceneLayer: true }).status, 'ok'));
+test('verdict_scene_path_passes', () => assert.strictEqual(verdict({ ...okCap(), effekseerPath: 'scene', overlayRequested: false, sceneLayer: true }).status, 'ok'));
+test('verdict_old_result_without_overlay_flag_passes', () => assert.strictEqual(verdict({ ...okCap(), effekseerPath: 'overlay' }).status, 'ok'));
+test('verdict_console_error_warns',() => assert.strictEqual(verdict({ ...okTime(), console: { 'error: x': 2, 'warn: y': 1 } }).status, 'warn'));
 
 // ---- compare ---------------------------------------------------------------
 // Two-pixel frames (8 bytes); record size [2, 1].
